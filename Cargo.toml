@@ -1,0 +1,10 @@
+[package]
+name = "rust_cascade"
+version = "0.1.0"
+authors = ["Mark Goodwin <mgoodwin@mozilla.com>"]
+
+[dependencies]
+sha2="*"
+bit-vec="*"
+byteorder="*"
+rand="*"
