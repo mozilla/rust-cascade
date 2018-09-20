@@ -104,14 +104,14 @@ impl<'a> Cascade<'a> {
             hasher_maker: hasher_maker,
         }
     }
-    pub fn initialize(&mut self, entries: Vec<Vec<u8>>, exclusions: Vec<Vec<u8>>) {
+    pub fn initialize(&mut self, entries: &Vec<Vec<u8>>, exclusions: &Vec<Vec<u8>>) {
         let mut false_positives = Vec::new();
-        for entry in &entries {
+        for entry in entries {
             self.filter.put(entry);
         }
 
         for entry in exclusions {
-            if self.filter.has(&entry) {
+            if self.filter.has(entry) {
                 false_positives.push(entry);
             }
         }
@@ -141,20 +141,20 @@ impl<'a> Cascade<'a> {
                 self.depth + 1,
                 self.hasher_maker,
             ));
-            child.initialize(mangled_false_positives, mangled_entries);
+            child.initialize(&mangled_false_positives, &mangled_entries);
             self.child_layer = Some(child);
         }
     }
 
-    pub fn has(&self, entry: Vec<u8>) -> bool {
-        if self.filter.has(&entry) {
+    pub fn has(&self, entry: &Vec<u8>) -> bool {
+        if self.filter.has(entry) {
             let mut mangled_entry = entry.to_vec();
             if self.depth > 0 {
                 mangled_entry.push(65);
             }
             match self.child_layer {
                 Some(ref child) => {
-                    return !child.has(mangled_entry);
+                    return !child.has(&mangled_entry);
                 }
                 None => {
                     return true;
@@ -164,15 +164,15 @@ impl<'a> Cascade<'a> {
         return false;
     }
 
-    pub fn check(&self, entries: Vec<Vec<u8>>, exclusions: Vec<Vec<u8>>) -> bool {
+    pub fn check(&self, entries: &Vec<Vec<u8>>, exclusions: &Vec<Vec<u8>>) -> bool {
         for entry in entries {
-            if !self.has(entry.clone()) {
+            if !self.has(entry) {
                 return false;
             }
         }
 
         for entry in exclusions {
-            if self.has(entry.clone()) {
+            if self.has(entry) {
                 return false;
             }
         }
@@ -254,9 +254,9 @@ fn filter_test() {
 
     let maker = Sha256Maker {};
     let mut cascade = Cascade::new(500, &maker);
-    cascade.initialize(foo.clone(), bar.clone());
+    cascade.initialize(&foo, &bar);
 
-    assert!(cascade.check(foo.clone(), bar.clone()) == true);
+    assert!(cascade.check(&foo, &bar) == true);
 }
 
 #[cfg(test)]
