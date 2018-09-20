@@ -7,8 +7,8 @@ extern crate digest;
 extern crate rand;
 extern crate sha2;
 
-use byteorder::{BigEndian, ByteOrder, ReadBytesExt};
 use bit_vec::BitVec;
+use byteorder::{BigEndian, ByteOrder, ReadBytesExt};
 
 use std::str;
 
@@ -25,7 +25,7 @@ pub struct Bloom<'a> {
     bitvec: BitVec,
     k: u32,
     bits: usize,
-    hasher_maker: &'a HasherMaker
+    hasher_maker: &'a HasherMaker,
 }
 
 impl<'a> Bloom<'a> {
@@ -40,7 +40,7 @@ impl<'a> Bloom<'a> {
             bitvec: bitvec,
             k: k,
             bits: bits,
-            hasher_maker: hasher_maker
+            hasher_maker: hasher_maker,
         }
     }
 
@@ -51,7 +51,10 @@ impl<'a> Bloom<'a> {
             BigEndian::write_u32(&mut buf, i);
             hash.bloom_input(&buf);
             hash.bloom_input(item);
-            self.bitvec.set(BigEndian::read_u32(&hash.bloom_result()) as usize % self.bits, true);
+            self.bitvec.set(
+                BigEndian::read_u32(&hash.bloom_result()) as usize % self.bits,
+                true,
+            );
         }
     }
 
@@ -62,12 +65,17 @@ impl<'a> Bloom<'a> {
             BigEndian::write_u32(&mut buf, i);
             hash.bloom_input(&buf);
             hash.bloom_input(item);
-            if  self.bitvec.get(BigEndian::read_u32(&hash.bloom_result()) as usize % self.bits).unwrap() == false {
+            if self
+                .bitvec
+                .get(BigEndian::read_u32(&hash.bloom_result()) as usize % self.bits)
+                .unwrap()
+                == false
+            {
                 return false;
             }
         }
 
-        return true
+        return true;
     }
 
     pub fn clear(&mut self) {
@@ -79,7 +87,7 @@ pub struct Cascade<'a> {
     filter: Bloom<'a>,
     child_layer: Option<Box<Cascade<'a>>>,
     depth: usize,
-    hasher_maker: &'a HasherMaker
+    hasher_maker: &'a HasherMaker,
 }
 
 impl<'a> Cascade<'a> {
@@ -93,7 +101,7 @@ impl<'a> Cascade<'a> {
             filter: Bloom::new(capacity, 2, hasher_maker),
             child_layer: Option::None,
             depth: depth,
-            hasher_maker: hasher_maker
+            hasher_maker: hasher_maker,
         }
     }
     pub fn initialize(&mut self, entries: Vec<Vec<u8>>, exclusions: Vec<Vec<u8>>) {
@@ -112,7 +120,7 @@ impl<'a> Cascade<'a> {
             let mut mangled_false_positives = Vec::new();
             let mut mangled_entries = Vec::new();
             println!("New layer for {} false positives", false_positives.len());
-            
+
             for entry in false_positives {
                 let mut v = entry.to_vec();
                 if self.depth > 0 {
@@ -128,8 +136,11 @@ impl<'a> Cascade<'a> {
                 }
                 mangled_entries.push(v);
             }
-            let mut child = Box::new(
-                Cascade::new_layer(mangled_false_positives.len(), self.depth + 1, self.hasher_maker));
+            let mut child = Box::new(Cascade::new_layer(
+                mangled_false_positives.len(),
+                self.depth + 1,
+                self.hasher_maker,
+            ));
             child.initialize(mangled_false_positives, mangled_entries);
             self.child_layer = Some(child);
         }
@@ -143,8 +154,8 @@ impl<'a> Cascade<'a> {
             }
             match self.child_layer {
                 Some(ref child) => {
-                    return ! child.has(mangled_entry);
-                },
+                    return !child.has(mangled_entry);
+                }
                 None => {
                     return true;
                 }
@@ -155,7 +166,7 @@ impl<'a> Cascade<'a> {
 
     pub fn check(&self, entries: Vec<Vec<u8>>, exclusions: Vec<Vec<u8>>) -> bool {
         for entry in entries {
-            if ! self.has(entry.clone()) {
+            if !self.has(entry.clone()) {
                 return false;
             }
         }
@@ -171,7 +182,7 @@ impl<'a> Cascade<'a> {
 }
 
 // construct a BloomHasher and HasherMaker for tests
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 
 // Implement the BloomHasher trait for sha2::Sha256 - we could also do this for the hash types used by
 // the standard collections
@@ -194,7 +205,7 @@ impl HasherMaker for Sha256Maker {
 
 #[test]
 fn bloom_test_bloom_size() {
-    let maker = Sha256Maker{};
+    let maker = Sha256Maker {};
     let bloom = Bloom::new(1024, 2, &maker);
     assert!(bloom.bitvec.len() == 8192);
 }
@@ -227,8 +238,8 @@ fn filter_test() {
     let mut rng = thread_rng();
 
     // create some entries and exclusions
-    let mut foo : Vec<Vec<u8>> = Vec::new();
-    let mut bar : Vec<Vec<u8>> = Vec::new();
+    let mut foo: Vec<Vec<u8>> = Vec::new();
+    let mut bar: Vec<Vec<u8>> = Vec::new();
 
     for i in 0..500 {
         let s = format!("{}", i);
