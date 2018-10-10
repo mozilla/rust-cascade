@@ -192,66 +192,64 @@ impl HasherMaker for Sha256Maker {
     }
 }
 
-#[test]
-fn bloom_test_bloom_size() {
-    let maker = Sha256Maker{};
-    let bloom = Bloom::new(1024, 2, &maker);
-    assert!(bloom.bitvec.len() == 8192);
-}
-
-#[test]
-fn bloom_test_put() {
-    let maker = Sha256Maker {};
-    let mut bloom = Bloom::new(1024, 2, &maker);
-    let key: &[u8] = b"foo";
-
-    bloom.put(key);
-}
-
-#[test]
-fn bloom_test_has() {
-    let maker = Sha256Maker {};
-    let mut bloom = Bloom::new(1024, 2, &maker);
-    let key: &[u8] = b"foo";
-
-    bloom.put(key);
-    assert!(bloom.has(key) == true);
-    assert!(bloom.has(b"bar") == false);
-}
-
-#[test]
-fn filter_test() {
-    use rand::prelude::*;
-
-    // thread_rng is often the most convenient source of randomness:
-    let mut rng = thread_rng();
-
-    // create some entries and exclusions
-    let mut foo : Vec<Vec<u8>> = Vec::new();
-    let mut bar : Vec<Vec<u8>> = Vec::new();
-
-    for i in 0..500 {
-        let s = format!("{}", i);
-        let bytes = s.into_bytes();
-        foo.push(bytes);
-    }
-
-    for _ in 0..100 {
-        let idx = rng.gen_range(0, foo.len());
-        bar.push(foo.swap_remove(idx));
-    }
-
-    let maker = Sha256Maker {};
-    let mut cascade = Cascade::new(500, &maker);
-    cascade.initialize(foo.clone(), bar.clone());
-
-    assert!(cascade.check(foo.clone(), bar.clone()) == true);
-}
-
 #[cfg(test)]
 mod tests {
+    use Bloom;
+    use Cascade;
+    use rand::prelude::*;
+    use Sha256Maker;
+
     #[test]
-    fn it_works() {
-        assert_eq!(2 + 2, 4);
+    fn bloom_test_bloom_size() {
+        let maker = Sha256Maker{};
+        let bloom = Bloom::new(1024, 2, &maker);
+        assert!(bloom.bitvec.len() == 8192);
+    }
+
+    #[test]
+    fn bloom_test_put() {
+        let maker = Sha256Maker {};
+        let mut bloom = Bloom::new(1024, 2, &maker);
+        let key: &[u8] = b"foo";
+
+        bloom.put(key);
+    }
+
+    #[test]
+    fn bloom_test_has() {
+        let maker = Sha256Maker {};
+        let mut bloom = Bloom::new(1024, 2, &maker);
+        let key: &[u8] = b"foo";
+
+        bloom.put(key);
+        assert!(bloom.has(key) == true);
+        assert!(bloom.has(b"bar") == false);
+    }
+
+    #[test]
+    fn filter_test() {
+        // thread_rng is often the most convenient source of randomness:
+        let mut rng = thread_rng();
+
+        // create some entries and exclusions
+        let mut foo : Vec<Vec<u8>> = Vec::new();
+        let mut bar : Vec<Vec<u8>> = Vec::new();
+
+        for i in 0..500 {
+            let s = format!("{}", i);
+            let bytes = s.into_bytes();
+            foo.push(bytes);
+        }
+
+        for _ in 0..100 {
+            let idx = rng.gen_range(0, foo.len());
+            bar.push(foo.swap_remove(idx));
+        }
+
+        let maker = Sha256Maker {};
+        let mut cascade = Cascade::new(500, &maker);
+        cascade.initialize(foo.clone(), bar.clone());
+
+        assert!(cascade.check(foo.clone(), bar.clone()) == true);
     }
 }
