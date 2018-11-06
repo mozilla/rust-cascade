@@ -5,7 +5,7 @@ authors = ["Mark Goodwin <mgoodwin@mozilla.com>"]
 
 [dependencies]
 murmurhash3="*"
-bit-vec="*"
+bitvec="*"
 byteorder="*"
 rand="*"
 digest="*"
