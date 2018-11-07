@@ -19,24 +19,27 @@ use std::str;
 
 pub struct Bloom {
     level: u32,
-    false_positive_rate: f32,
     n_hash_funcs: u32,
     size: usize,
     bitvec: BitVec<bitvec::LittleEndian>,
 }
 
-impl Bloom {
-    pub fn new(elements: u32, false_positive_rate: f32, level: u32) -> Bloom {
+pub fn calculate_n_hash_funcs(error_rate: f32) -> u32 {
+        return ((1.0 / error_rate).ln() / (2.0_f32).ln()).ceil() as u32;
+}
 
-        let n_hash_funcs = ((1.0 / false_positive_rate).ln() / (2.0_f32).ln()).ceil() as u32;
+pub fn calculate_size(elements: usize, error_rate: f32) -> usize {
+        let n_hash_funcs = calculate_n_hash_funcs(error_rate);
         let hashes = n_hash_funcs as f32;
-        let size = (1.0_f32 - (hashes * (elements as f32 + 0.5) / (1.0_f32 - false_positive_rate.powf(1.0 / hashes)).ln())).ceil() as usize;
+        return (1.0_f32 - (hashes * (elements as f32 + 0.5) / (1.0_f32 - error_rate.powf(1.0 / hashes)).ln())).ceil() as usize;
+}
 
+impl Bloom {
+    pub fn new(size: usize, n_hash_funcs: u32, level: u32) -> Bloom {
         let bitvec: BitVec<bitvec::LittleEndian> = bitvec![LittleEndian; 0; size];
 
         Bloom {
             level: level,
-            false_positive_rate: false_positive_rate,
             n_hash_funcs: n_hash_funcs,
             size: size,
             bitvec: bitvec,
@@ -45,33 +48,30 @@ impl Bloom {
 
     // TODO: MDG - this could usefully return a Result since parsing can fail
     pub fn from_bytes(mut bytes: &[u8]) -> Bloom {
-        // Load the layer metadata. bloomer.py writes false_positive_rate, elements and level as little-endian
-        // float, unsigned int and unsigned int respectively.
+        // Load the layer metadata. bloomer.py writes size, nHashFuncs and level as little-endian
+        // unsigned ints.
         // TODO: MDG - we should match on bytes.len() and return an error result if too small
-        let false_positive_rate = bytes.read_f32::<LittleEndian>().unwrap() as f32;
-        let elements = bytes.read_i32::<LittleEndian>().unwrap() as u32;
+        let size = bytes.read_i32::<LittleEndian>().unwrap() as usize;
+        let n_hash_funcs = bytes.read_i32::<LittleEndian>().unwrap() as u32;
         let level = bytes.read_i32::<LittleEndian>().unwrap() as u32;
 
-        let n_hash_funcs = ((1.0 / false_positive_rate).ln() / (2.0_f32).ln()).ceil() as u32;
-        let hashes = n_hash_funcs as f32;
-        let size = (1.0_f32 - (hashes * (elements as f32 + 0.5) / (1.0_f32 - false_positive_rate.powf(1.0 / hashes)).ln())).ceil() as usize;
-        
         let byte_count = (size as f32 / 8.0).ceil() as usize;
 
         // TODO: MDG - check the byte_count matches the available data and return an error result if too small
 
         Bloom {
             level: level,
-            false_positive_rate: false_positive_rate,
-            n_hash_funcs: ((1.0 / false_positive_rate).ln() / (2.0_f32).ln()).ceil() as u32,
+            n_hash_funcs: n_hash_funcs,
             size: size,
             bitvec: bytes[0..byte_count].into(),
         }
     }
 
     fn hash(&self, n_fn: u32, key: &[u8]) -> usize {
+        println!("key is {:?}", key);
         let hash_seed = (n_fn << 16) + self.level;
         let h = murmurhash3_x86_32(key, hash_seed) as usize % self.size;
+        println!("h from hash is {}, maxu32 is {}", h, std::u32::MAX);
         h
     }
 
@@ -83,9 +83,13 @@ impl Bloom {
     }
 
     pub fn has(&self, item: &[u8]) -> bool {
+        println!("n_hash_funcs {}", self.n_hash_funcs);
         for i in 0..self.n_hash_funcs {
             if  self.bitvec.get(self.hash(i, item)) == false {
+                println!("not in {}#{}", self.level, i);
                 return false;
+            } else {
+                println!("in {}#{}", self.level, i);
             }
         }
 
@@ -100,12 +104,11 @@ impl Bloom {
 pub struct Cascade {
     filter: Bloom,
     child_layer: Option<Box<Cascade>>,
-    oversize_factor: f32,
 }
 
 impl Cascade {
-    pub fn new(capacity: usize, oversize_factor: f32, error_rate: f32) -> Cascade {
-        return Cascade::new_layer(capacity, oversize_factor, error_rate, 0);
+    pub fn new(size: usize, n_hash_funcs: u32) -> Cascade {
+        return Cascade::new_layer(size, n_hash_funcs, 1);
     }
 
     // TODO: MDG - this could usefully return a Result since parsing can fail
@@ -120,19 +123,18 @@ impl Cascade {
                 return Option::Some(Box::new(Cascade{
                     filter: fil,
                     child_layer: Cascade::from_bytes(&bytes[(12 + byte_count)..]), // a layer header is 12 bytes (f32, u32, u32)
-                    oversize_factor: 1.0
                 }));
             }
         }
     }
 
-    fn new_layer(capacity: usize, oversize_factor: f32, error_rate: f32, depth: u32) -> Cascade {
+    fn new_layer(size: usize, n_hash_funcs: u32, layer: u32) -> Cascade {
         Cascade {
-            filter: Bloom::new((capacity as f32 * oversize_factor) as u32, error_rate, depth),
+            filter: Bloom::new(size, n_hash_funcs, layer),
             child_layer: Option::None,
-            oversize_factor: oversize_factor
         }
     }
+
     pub fn initialize(&mut self, entries: Vec<Vec<u8>>, exclusions: Vec<Vec<u8>>) {
         let mut false_positives = Vec::new();
         for entry in &entries {
@@ -146,8 +148,10 @@ impl Cascade {
         }
 
         if false_positives.len() > 0 {
+            let n_hash_funcs = calculate_n_hash_funcs(0.5);
+            let size = calculate_size(false_positives.len(), 0.5);
             let mut child = Box::new(
-                Cascade::new_layer(false_positives.len(), self.oversize_factor, self.filter.false_positive_rate, self.filter.level + 1));
+                Cascade::new_layer(size, n_hash_funcs, self.filter.level + 1));
             child.initialize(false_positives, entries);
             self.child_layer = Some(child);
         }
@@ -157,13 +161,17 @@ impl Cascade {
         if self.filter.has(&entry) {
             match self.child_layer {
                 Some(ref child) => {
-                    return ! child.has(entry);
+                    let child_value = ! child.has(entry);
+                    println!("child_value is {}", child_value);
+                    return child_value;
                 },
                 None => {
+                    println!("no child; returning true");
                     return true;
                 }
             }
         }
+        println!("no entry; returning false");
         return false;
     }
 
@@ -188,6 +196,8 @@ impl Cascade {
 mod tests {
     use Bloom;
     use Cascade;
+    use calculate_n_hash_funcs;
+    use calculate_size;
     use rand::prelude::*;
 
     use std::fs::File;
@@ -196,14 +206,24 @@ mod tests {
 
     #[test]
     fn bloom_test_bloom_size() {
-        let bloom = Bloom::new(1024, 0.01, 0);
+        let error_rate = 0.01;
+        let elements = 1024;
+        let n_hash_funcs = calculate_n_hash_funcs(error_rate);
+        let size = calculate_size(elements, error_rate);
+
+        let bloom = Bloom::new(size, n_hash_funcs, 0);
         println!("{}", bloom.bitvec.len());
         assert!(bloom.bitvec.len() == 9829);
     }
 
     #[test]
     fn bloom_test_put() {
-        let mut bloom = Bloom::new(1024, 0.01, 0);
+        let error_rate = 0.01;
+        let elements = 1024;
+        let n_hash_funcs = calculate_n_hash_funcs(error_rate);
+        let size = calculate_size(elements, error_rate);
+
+        let mut bloom = Bloom::new(size, n_hash_funcs, 0);
         let key: &[u8] = b"foo";
 
         bloom.put(key);
@@ -211,7 +231,12 @@ mod tests {
 
     #[test]
     fn bloom_test_has() {
-        let mut bloom = Bloom::new(1024, 0.01, 0);
+        let error_rate = 0.01;
+        let elements = 1024;
+        let n_hash_funcs = calculate_n_hash_funcs(error_rate);
+        let size = calculate_size(elements, error_rate);
+
+        let mut bloom = Bloom::new(size, n_hash_funcs, 0);
         let key: &[u8] = b"foo";
 
         bloom.put(key);
@@ -221,10 +246,10 @@ mod tests {
 
     #[test]
     fn bloom_test_from_bytes() {
-        let src: Vec<u8> = vec![0x00,0x00, 0x00,0x3f, 0x0a,0x00, 0x00,0x00, 0x00,0x00, 0x00,0x00, 0x00,0x18, 0x00,0x00];
+        let src: Vec<u8> = vec![0x09, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x41, 0x00];
 
         let mut bloom = Bloom::from_bytes(&src);
-        assert!(bloom.has(b"test") ==  true);
+        assert!(bloom.has(b"this") ==  true);
         assert!(bloom.has(b"that") ==  true);
         assert!(bloom.has(b"other") ==  false);
 
@@ -246,8 +271,8 @@ mod tests {
                         
                 let bloom = Bloom::from_bytes(&v);
 
-                assert!(bloom.has(b"test") == true);
-                assert!(bloom.has(b"another test") == true);
+                assert!(bloom.has(b"this") == true);
+                assert!(bloom.has(b"that") == true);
                 assert!(bloom.has(b"yet another test") == false);
             },
             Err(err) => {
@@ -276,7 +301,12 @@ mod tests {
             bar.push(foo.swap_remove(idx));
         }
 
-        let mut cascade = Cascade::new(500, 1.1, 0.5);
+        let error_rate = 0.5;
+        let elements = 500;
+        let n_hash_funcs = calculate_n_hash_funcs(error_rate);
+        let size = calculate_size(elements, error_rate);
+
+        let mut cascade = Cascade::new(size, n_hash_funcs);
         cascade.initialize(foo.clone(), bar.clone());
 
         assert!(cascade.check(foo.clone(), bar.clone()) == true);
@@ -285,33 +315,23 @@ mod tests {
     #[test]
     fn cascade_from_file_bytes_test() {
         
-        let f = File::open("test_data/test_mlbf").unwrap();
-        
-        let file_result: Result<Vec<u8>, _> = f.bytes().collect();
-        let mut v: Vec<u8> = vec![];
-        match file_result {
-            Ok(data) => {
-                for elem in data {
-                    v.push(elem);
-                }
-                        
-                let opt = Cascade::from_bytes(&v);
+        let mut f = File::open("test_data/test_mlbf").unwrap();
 
-                match opt {
-                    Some(cascade) => {
-                        assert!(cascade.has(b"test") == true);
-                        assert!(cascade.has(b"another test") == true);
-                        assert!(cascade.has(b"yet another test") == true);
-                        assert!(cascade.has(b"blah") == false);
-                        assert!(cascade.has(b"blah blah") == false);
-                        assert!(cascade.has(b"blah blah blah") == false);
-                    },
-                    None => {}
-                }
+        let mut v: Vec<u8> = Vec::with_capacity(f.metadata().unwrap().len() as usize);
+        f.read_to_end(&mut v).unwrap();
+                
+        let opt = Cascade::from_bytes(&v);
+
+        match opt {
+            Some(cascade) => {
+                assert!(cascade.has(b"test") == true);
+                assert!(cascade.has(b"another test") == true);
+                assert!(cascade.has(b"yet another test") == true);
+                assert!(cascade.has(b"blah") == false);
+                assert!(cascade.has(b"blah blah") == false);
+                assert!(cascade.has(b"blah blah blah") == false);
             },
-            Err(err) => {
-                println!("Something went wrong! {:?}", err);
-            }
+            None => {}
         }
     }
 }
