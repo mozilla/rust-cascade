@@ -8,7 +8,7 @@ extern crate murmurhash3;
 extern crate rand;
 
 use bitvec::*;
-use byteorder::{LittleEndian, ReadBytesExt};
+use byteorder::{ReadBytesExt};
 use murmurhash3::murmurhash3_x86_32;
 
 use std::io::prelude::*;
@@ -36,7 +36,7 @@ pub fn calculate_size(elements: usize, error_rate: f32) -> usize {
 
 impl Bloom {
     pub fn new(size: usize, n_hash_funcs: u32, level: u32) -> Bloom {
-        let bitvec: BitVec<bitvec::LittleEndian> = bitvec![LittleEndian; 0; size];
+        let bitvec: BitVec<LittleEndian> = bitvec![LittleEndian; 0; size];
 
         Bloom {
             level: level,
@@ -51,9 +51,9 @@ impl Bloom {
         // Load the layer metadata. bloomer.py writes size, nHashFuncs and level as little-endian
         // unsigned ints.
         // TODO: MDG - we should match on bytes.len() and return an error result if too small
-        let size = bytes.read_i32::<LittleEndian>().unwrap() as usize;
-        let n_hash_funcs = bytes.read_i32::<LittleEndian>().unwrap() as u32;
-        let level = bytes.read_i32::<LittleEndian>().unwrap() as u32;
+        let size = bytes.read_i32::<byteorder::LittleEndian>().unwrap() as usize;
+        let n_hash_funcs = bytes.read_i32::<byteorder::LittleEndian>().unwrap() as u32;
+        let level = bytes.read_i32::<byteorder::LittleEndian>().unwrap() as u32;
 
         let byte_count = (size as f32 / 8.0).ceil() as usize;
 
