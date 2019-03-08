@@ -13,7 +13,7 @@ use murmurhash3::murmurhash3_x86_32;
 
 use std::io::prelude::*;
 use std::io;
-use std::io::Read;
+use std::io::{Error, ErrorKind, Read};
 use std::iter::FromIterator;
 use std::str;
 
@@ -46,32 +46,32 @@ impl Bloom {
         }
     }
 
-    // TODO: MDG - this could usefully return a Result since parsing can fail
-    pub fn from_bytes(mut bytes: &[u8]) -> Bloom {
+    pub fn from_bytes(mut bytes: &[u8]) -> Result<Bloom, Error> {
+        println!("bytes {:?}", bytes);
         // Load the layer metadata. bloomer.py writes size, nHashFuncs and level as little-endian
         // unsigned ints.
-        // TODO: MDG - we should match on bytes.len() and return an error result if too small
         let size = bytes.read_i32::<byteorder::LittleEndian>().unwrap() as usize;
         let n_hash_funcs = bytes.read_i32::<byteorder::LittleEndian>().unwrap() as u32;
         let level = bytes.read_i32::<byteorder::LittleEndian>().unwrap() as u32;
 
         let byte_count = (size as f32 / 8.0).ceil() as usize;
+        println!("bytes, size / byte_count / length {:?} {} {} {}", bytes, size, byte_count, bytes.len());
 
-        // TODO: MDG - check the byte_count matches the available data and return an error result if too small
+        if byte_count > bytes.len() {
+            return Err(Error::new(ErrorKind::InvalidInput, "Invalid data"));
+        }
 
-        Bloom {
+        Ok(Bloom {
             level: level,
             n_hash_funcs: n_hash_funcs,
             size: size,
             bitvec: bytes[0..byte_count].into(),
-        }
+        })
     }
 
     fn hash(&self, n_fn: u32, key: &[u8]) -> usize {
-        println!("key is {:?}", key);
         let hash_seed = (n_fn << 16) + self.level;
         let h = murmurhash3_x86_32(key, hash_seed) as usize % self.size;
-        println!("h from hash is {}, maxu32 is {}", h, std::u32::MAX);
         h
     }
 
@@ -83,17 +83,13 @@ impl Bloom {
     }
 
     pub fn has(&self, item: &[u8]) -> bool {
-        println!("n_hash_funcs {}", self.n_hash_funcs);
         for i in 0..self.n_hash_funcs {
             if  self.bitvec.get(self.hash(i, item)) == false {
-                println!("not in {}#{}", self.level, i);
                 return false;
-            } else {
-                println!("in {}#{}", self.level, i);
             }
         }
 
-        return true
+        true
     }
 
     pub fn clear(&mut self) {
@@ -111,19 +107,20 @@ impl Cascade {
         return Cascade::new_layer(size, n_hash_funcs, 1);
     }
 
-    // TODO: MDG - this could usefully return a Result since parsing can fail
-    pub fn from_bytes(bytes: &[u8]) -> Option<Box<Cascade>> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Option<Box<Cascade>>, Error> {
         match bytes.len() {
-            0 => Option::None,
+            0 => Ok(Option::None),
             _ => {
-                let fil = Bloom::from_bytes(bytes);
+                let fil = Bloom::from_bytes(bytes)?;
                 let len = fil.size;
                 let byte_count = (len as f32 / 8.0).ceil() as usize;
+ 
+                println!("length / byte_count {} {}", len, byte_count);
 
-                return Option::Some(Box::new(Cascade{
+                return Ok(Option::Some(Box::new(Cascade{
                     filter: fil,
-                    child_layer: Cascade::from_bytes(&bytes[(12 + byte_count)..]), // a layer header is 12 bytes (f32, u32, u32)
-                }));
+                    child_layer: Cascade::from_bytes(&bytes[(12 + byte_count)..])?, // a layer header is 12 bytes (f32, u32, u32)
+                })));
             }
         }
     }
@@ -162,16 +159,13 @@ impl Cascade {
             match self.child_layer {
                 Some(ref child) => {
                     let child_value = ! child.has(entry);
-                    println!("child_value is {}", child_value);
                     return child_value;
                 },
                 None => {
-                    println!("no child; returning true");
                     return true;
                 }
             }
         }
-        println!("no entry; returning false");
         return false;
     }
 
@@ -248,13 +242,28 @@ mod tests {
     fn bloom_test_from_bytes() {
         let src: Vec<u8> = vec![0x09, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x41, 0x00];
 
-        let mut bloom = Bloom::from_bytes(&src);
-        assert!(bloom.has(b"this") ==  true);
-        assert!(bloom.has(b"that") ==  true);
-        assert!(bloom.has(b"other") ==  false);
+        match Bloom::from_bytes(&src) {
+            Ok(mut bloom) => {
+                assert!(bloom.has(b"this") ==  true);
+                assert!(bloom.has(b"that") ==  true);
+                assert!(bloom.has(b"other") ==  false);
 
-        bloom.put(b"other");
-        assert!(bloom.has(b"other") ==  true);
+                bloom.put(b"other");
+                assert!(bloom.has(b"other") ==  true);
+            },
+            Err(_) => {
+                panic!("Parsing failed");
+            }
+        };
+
+        let short: Vec<u8> = vec![0x09, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x41];
+        match Bloom::from_bytes(&short) {
+            Ok(_) => {
+                panic!("Parsing should fail; data is truncated");
+            },
+            Err(_) => {}
+        };
+
     }
 
     #[test]
@@ -269,11 +278,17 @@ mod tests {
                     v.push(elem);
                 }
                         
-                let bloom = Bloom::from_bytes(&v);
+                match Bloom::from_bytes(&v) {
+                    Ok(bloom) => {
+                        assert!(bloom.has(b"this") == true);
+                        assert!(bloom.has(b"that") == true);
+                        assert!(bloom.has(b"yet another test") == false);
+                    },
+                    Err(_) => {
+                        panic!("Parsing failed");
+                    }
+                };
 
-                assert!(bloom.has(b"this") == true);
-                assert!(bloom.has(b"that") == true);
-                assert!(bloom.has(b"yet another test") == false);
             },
             Err(err) => {
                 println!("Something went wrong! {:?}", err);
@@ -314,24 +329,43 @@ mod tests {
 
     #[test]
     fn cascade_from_file_bytes_test() {
-        
         let mut f = File::open("test_data/test_mlbf").unwrap();
 
         let mut v: Vec<u8> = Vec::with_capacity(f.metadata().unwrap().len() as usize);
         f.read_to_end(&mut v).unwrap();
                 
-        let opt = Cascade::from_bytes(&v);
+        let result = Cascade::from_bytes(&v);
 
-        match opt {
-            Some(cascade) => {
-                assert!(cascade.has(b"test") == true);
-                assert!(cascade.has(b"another test") == true);
-                assert!(cascade.has(b"yet another test") == true);
-                assert!(cascade.has(b"blah") == false);
-                assert!(cascade.has(b"blah blah") == false);
-                assert!(cascade.has(b"blah blah blah") == false);
+        match result {
+            Ok(opt) => {
+                match opt {
+                    Some(cascade) => {
+                        assert!(cascade.has(b"test") == true);
+                        assert!(cascade.has(b"another test") == true);
+                        assert!(cascade.has(b"yet another test") == true);
+                        assert!(cascade.has(b"blah") == false);
+                        assert!(cascade.has(b"blah blah") == false);
+                        assert!(cascade.has(b"blah blah blah") == false);
+                    },
+                    None => {}
+                }
             },
-            None => {}
+            Err(_) => {
+                panic!("Parsing failed")
+            }
+        }
+
+        let mut f = File::open("test_data/test_short_mlbf").unwrap();
+
+        let mut v: Vec<u8> = Vec::with_capacity(f.metadata().unwrap().len() as usize);
+        f.read_to_end(&mut v).unwrap();
+                
+        let result = Cascade::from_bytes(&v);
+        match result {
+            Ok(_) => {
+                panic!("Parsing should fail");
+            },
+            Err(_) => {}
         }
     }
 }
