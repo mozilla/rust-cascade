@@ -84,7 +84,7 @@ impl Bloom {
 
     pub fn has(&self, item: &[u8]) -> bool {
         for i in 0..self.n_hash_funcs {
-            if  self.bitvec.get(self.hash(i, item)) == false {
+            if !self.bitvec.get(self.hash(i, item)) {
                 return false;
             }
         }
