@@ -49,7 +49,6 @@ impl Bloom {
     }
 
     pub fn from_bytes(mut bytes: &[u8]) -> Result<Bloom, Error> {
-        println!("bytes {:?}", bytes);
         // Load the layer metadata. bloomer.py writes size, nHashFuncs and level as little-endian
         // unsigned ints.
         let size = bytes.read_i32::<byteorder::LittleEndian>().unwrap() as usize;
@@ -57,13 +56,6 @@ impl Bloom {
         let level = bytes.read_i32::<byteorder::LittleEndian>().unwrap() as u32;
 
         let byte_count = (size as f32 / 8.0).ceil() as usize;
-        println!(
-            "bytes, size / byte_count / length {:?} {} {} {}",
-            bytes,
-            size,
-            byte_count,
-            bytes.len()
-        );
 
         if byte_count > bytes.len() {
             return Err(Error::new(ErrorKind::InvalidInput, "Invalid data"));
@@ -123,8 +115,6 @@ impl Cascade {
                 let fil = Bloom::from_bytes(bytes)?;
                 let len = fil.size;
                 let byte_count = (len as f32 / 8.0).ceil() as usize;
-
-                println!("length / byte_count {} {}", len, byte_count);
 
                 return Ok(Option::Some(Box::new(Cascade {
                     filter: fil,
@@ -218,7 +208,6 @@ mod tests {
         let size = calculate_size(elements, error_rate);
 
         let bloom = Bloom::new(size, n_hash_funcs, 0);
-        println!("{}", bloom.bitvec.len());
         assert!(bloom.bitvec.len() == 9829);
     }
 
