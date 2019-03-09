@@ -2,7 +2,7 @@
 name = "rust_cascade"
 description = "A simple mmh3 based bloom filter cascade implementation in Rust."
 license-file = "license.txt"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Mark Goodwin <mgoodwin@mozilla.com>"]
 
 [dependencies]
