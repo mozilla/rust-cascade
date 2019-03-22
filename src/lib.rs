@@ -192,7 +192,7 @@ impl Cascade {
 mod tests {
     use calculate_n_hash_funcs;
     use calculate_size;
-    use rand::prelude::*;
+    use rand::Rng;
     use Bloom;
     use Cascade;
 
@@ -302,7 +302,7 @@ mod tests {
     #[test]
     fn cascade_test() {
         // thread_rng is often the most convenient source of randomness:
-        let mut rng = thread_rng();
+        let mut rng = rand::thread_rng();
 
         // create some entries and exclusions
         let mut foo: Vec<Vec<u8>> = Vec::new();
