@@ -1,6 +1,3 @@
-#![allow(dead_code)]
-#![allow(unused_imports)]
-
 extern crate bitvec;
 extern crate byteorder;
 extern crate digest;
@@ -11,11 +8,7 @@ use bitvec::*;
 use byteorder::ReadBytesExt;
 use murmurhash3::murmurhash3_x86_32;
 
-use std::io;
-use std::io::prelude::*;
-use std::io::{Error, ErrorKind, Read};
-use std::iter::FromIterator;
-use std::str;
+use std::io::{Error, ErrorKind};
 
 pub struct Bloom {
     level: u32,
@@ -51,9 +44,9 @@ impl Bloom {
     pub fn from_bytes(mut bytes: &[u8]) -> Result<Bloom, Error> {
         // Load the layer metadata. bloomer.py writes size, nHashFuncs and level as little-endian
         // unsigned ints.
-        let size = bytes.read_i32::<byteorder::LittleEndian>().unwrap() as usize;
-        let n_hash_funcs = bytes.read_i32::<byteorder::LittleEndian>().unwrap() as u32;
-        let level = bytes.read_i32::<byteorder::LittleEndian>().unwrap() as u32;
+        let size = bytes.read_i32::<byteorder::LittleEndian>()? as usize;
+        let n_hash_funcs = bytes.read_i32::<byteorder::LittleEndian>()? as u32;
+        let level = bytes.read_i32::<byteorder::LittleEndian>()? as u32;
 
         let byte_count = (size as f32 / 8.0).ceil() as usize;
 
@@ -109,19 +102,18 @@ impl Cascade {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Option<Box<Cascade>>, Error> {
-        match bytes.len() {
-            0 => Ok(Option::None),
-            _ => {
-                let fil = Bloom::from_bytes(bytes)?;
-                let len = fil.size;
-                let byte_count = (len as f32 / 8.0).ceil() as usize;
-
-                return Ok(Option::Some(Box::new(Cascade {
-                    filter: fil,
-                    child_layer: Cascade::from_bytes(&bytes[(12 + byte_count)..])?, // a layer header is 12 bytes (f32, u32, u32)
-                })));
-            }
+        if bytes.len() ==0 {
+            return Ok(None);
         }
+        
+        let fil = Bloom::from_bytes(bytes)?;
+        let len = fil.size;
+        let byte_count = (len as f32 / 8.0).ceil() as usize;
+
+        Ok(Some(Box::new(Cascade {
+            filter: fil,
+            child_layer: Cascade::from_bytes(&bytes[(12 + byte_count)..])?, // a layer header is 12 bytes (f32, u32, u32)
+        })))
     }
 
     fn new_layer(size: usize, n_hash_funcs: u32, layer: u32) -> Cascade {
@@ -173,13 +165,13 @@ impl Cascade {
 
     pub fn check(&self, entries: Vec<Vec<u8>>, exclusions: Vec<Vec<u8>>) -> bool {
         for entry in entries {
-            if !self.has(&entry.clone()) {
+            if !self.has(&entry) {
                 return false;
             }
         }
 
         for entry in exclusions {
-            if self.has(&entry.clone()) {
+            if self.has(&entry) {
                 return false;
             }
         }
@@ -196,7 +188,6 @@ mod tests {
     use Bloom;
     use Cascade;
 
-    use bitvec::{BitVec, Bits};
     use std::fs::File;
     use std::io::Read;
 
