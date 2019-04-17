@@ -4,11 +4,11 @@ extern crate digest;
 extern crate murmurhash3;
 extern crate rand;
 
-use bitvec::*;
+use bitvec::{bitvec, BitVec, LittleEndian};
 use byteorder::ReadBytesExt;
 use murmurhash3::murmurhash3_x86_32;
 
-use std::io::{Error, ErrorKind};
+use std::io::{Cursor, Error, ErrorKind, Read};
 
 pub struct Bloom {
     level: u32,
@@ -18,7 +18,7 @@ pub struct Bloom {
 }
 
 pub fn calculate_n_hash_funcs(error_rate: f32) -> u32 {
-    return ((1.0 / error_rate).ln() / (2.0_f32).ln()).ceil() as u32;
+    ((1.0 / error_rate).ln() / (2.0_f32).ln()).ceil() as u32
 }
 
 pub fn calculate_size(elements: usize, error_rate: f32) -> usize {
@@ -41,24 +41,38 @@ impl Bloom {
         }
     }
 
-    pub fn from_bytes(mut bytes: &[u8]) -> Result<Bloom, Error> {
+    pub fn from_bytes<R: Read>(reader: &mut R) -> Result<Bloom, Error> {
         // Load the layer metadata. bloomer.py writes size, nHashFuncs and level as little-endian
         // unsigned ints.
-        let size = bytes.read_i32::<byteorder::LittleEndian>()? as usize;
-        let n_hash_funcs = bytes.read_i32::<byteorder::LittleEndian>()? as u32;
-        let level = bytes.read_i32::<byteorder::LittleEndian>()? as u32;
+        let mut twelve_byte_buf: [u8; 12] = [0; 12];
 
-        let byte_count = (size as f32 / 8.0).ceil() as usize;
-
-        if byte_count > bytes.len() {
+        if let Err(_) = reader.read_exact(&mut twelve_byte_buf) {
             return Err(Error::new(ErrorKind::InvalidInput, "Invalid data"));
         }
 
+        let mut cursor = Cursor::new(twelve_byte_buf);
+
+        let size = cursor.read_u32::<byteorder::LittleEndian>()? as usize;
+        let n_hash_funcs = cursor.read_u32::<byteorder::LittleEndian>()?;
+        let level = cursor.read_u32::<byteorder::LittleEndian>()?;
+
+        let rotated_size = size.rotate_right(3);
+
+        let byte_count = if rotated_size > size {
+            let mask = !7usize.rotate_right(3);
+            mask & rotated_size + 1
+        } else {
+            rotated_size
+        };
+
+        let mut bitvec_buf = vec![0u8; byte_count];
+        reader.read_exact(&mut bitvec_buf)?;
+
         Ok(Bloom {
-            level: level,
-            n_hash_funcs: n_hash_funcs,
-            size: size,
-            bitvec: bytes[0..byte_count].into(),
+            level,
+            n_hash_funcs,
+            size,
+            bitvec: bitvec_buf.into(),
         })
     }
 
@@ -79,7 +93,10 @@ impl Bloom {
         for i in 0..self.n_hash_funcs {
             match self.bitvec.get(self.hash(i, item)) {
                 Some(false) => return false,
-                _ => (),
+                Some(true) => (),
+                None => panic!(
+                    "access outside the bloom filter bit vector (this is almost certainly a bug)"
+                ),
             }
         }
 
@@ -102,18 +119,20 @@ impl Cascade {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Option<Box<Cascade>>, Error> {
-        if bytes.len() ==0 {
-            return Ok(None);
+        if bytes.len() > 0 {
+            let mut cursor = Cursor::new(bytes);
+            let version = cursor.read_u16::<byteorder::LittleEndian>()?;
+            println!("version is {:x} - {:x?}", version, bytes);
+            if version != 1 {
+                return Err(Error::new(ErrorKind::InvalidInput, "Invalid version"));
+            }
+            Ok(Some(Box::new(Cascade {
+                filter: Bloom::from_bytes(&mut cursor)?,
+                child_layer: Cascade::from_bytes(&cursor.get_ref()[cursor.position() as usize..])?,
+            })))
+        } else {
+            Ok(None)
         }
-        
-        let fil = Bloom::from_bytes(bytes)?;
-        let len = fil.size;
-        let byte_count = (len as f32 / 8.0).ceil() as usize;
-
-        Ok(Some(Box::new(Cascade {
-            filter: fil,
-            child_layer: Cascade::from_bytes(&bytes[(12 + byte_count)..])?, // a layer header is 12 bytes (f32, u32, u32)
-        })))
     }
 
     fn new_layer(size: usize, n_hash_funcs: u32, layer: u32) -> Cascade {
@@ -189,7 +208,7 @@ mod tests {
     use Cascade;
 
     use std::fs::File;
-    use std::io::Read;
+    use std::io::{Cursor, Read};
 
     #[test]
     fn bloom_test_bloom_size() {
@@ -236,7 +255,7 @@ mod tests {
             0x09, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x41, 0x00,
         ];
 
-        match Bloom::from_bytes(&src) {
+        match Bloom::from_bytes(&mut Cursor::new(src)) {
             Ok(mut bloom) => {
                 assert!(bloom.has(b"this") == true);
                 assert!(bloom.has(b"that") == true);
@@ -253,7 +272,7 @@ mod tests {
         let short: Vec<u8> = vec![
             0x09, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x41,
         ];
-        match Bloom::from_bytes(&short) {
+        match Bloom::from_bytes(&mut Cursor::new(short)) {
             Ok(_) => {
                 panic!("Parsing should fail; data is truncated");
             }
@@ -273,7 +292,7 @@ mod tests {
                     v.push(elem);
                 }
 
-                match Bloom::from_bytes(&v) {
+                match Bloom::from_bytes(&mut Cursor::new(v)) {
                     Ok(bloom) => {
                         assert!(bloom.has(b"this") == true);
                         assert!(bloom.has(b"that") == true);
