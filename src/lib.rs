@@ -8,8 +8,9 @@ use bitvec::{bitvec, BitVec, LittleEndian};
 use byteorder::ReadBytesExt;
 use murmurhash3::murmurhash3_x86_32;
 
-use std::io::{Cursor, Error, ErrorKind, Read};
+use std::io::{Error, ErrorKind, Read};
 
+#[derive(Debug)]
 pub struct Bloom {
     level: u32,
     n_hash_funcs: u32,
@@ -41,32 +42,22 @@ impl Bloom {
         }
     }
 
-    pub fn from_bytes<R: Read>(reader: &mut R) -> Result<Bloom, Error> {
+    pub fn from_bytes(cursor: &mut &[u8]) -> Result<Bloom, Error> {
         // Load the layer metadata. bloomer.py writes size, nHashFuncs and level as little-endian
         // unsigned ints.
-        let mut twelve_byte_buf: [u8; 12] = [0; 12];
-
-        if let Err(_) = reader.read_exact(&mut twelve_byte_buf) {
-            return Err(Error::new(ErrorKind::InvalidInput, "Invalid data"));
-        }
-
-        let mut cursor = Cursor::new(twelve_byte_buf);
-
         let size = cursor.read_u32::<byteorder::LittleEndian>()? as usize;
         let n_hash_funcs = cursor.read_u32::<byteorder::LittleEndian>()?;
         let level = cursor.read_u32::<byteorder::LittleEndian>()?;
 
-        let rotated_size = size.rotate_right(3);
-
-        let byte_count = if rotated_size > size {
-            let mask = !7usize.rotate_right(3);
-            mask & rotated_size + 1
+        let shifted_size = size.wrapping_shr(3);
+        let byte_count = if size % 8 != 0 {
+            shifted_size + 1
         } else {
-            rotated_size
+            shifted_size
         };
 
         let mut bitvec_buf = vec![0u8; byte_count];
-        reader.read_exact(&mut bitvec_buf)?;
+        cursor.read_exact(&mut bitvec_buf)?;
 
         Ok(Bloom {
             level,
@@ -108,6 +99,7 @@ impl Bloom {
     }
 }
 
+#[derive(Debug)]
 pub struct Cascade {
     filter: Bloom,
     child_layer: Option<Box<Cascade>>,
@@ -119,20 +111,19 @@ impl Cascade {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Option<Box<Cascade>>, Error> {
-        if bytes.len() > 0 {
-            let mut cursor = Cursor::new(bytes);
-            let version = cursor.read_u16::<byteorder::LittleEndian>()?;
-            println!("version is {:x} - {:x?}", version, bytes);
-            if version != 1 {
-                return Err(Error::new(ErrorKind::InvalidInput, "Invalid version"));
-            }
-            Ok(Some(Box::new(Cascade {
-                filter: Bloom::from_bytes(&mut cursor)?,
-                child_layer: Cascade::from_bytes(&cursor.get_ref()[cursor.position() as usize..])?,
-            })))
-        } else {
-            Ok(None)
+        if bytes.len() == 0 {
+            return Ok(None);
         }
+        let mut cursor = bytes;
+        let version = cursor.read_u16::<byteorder::LittleEndian>()?;
+        println!("version is {:x} - {:x?}", version, bytes);
+        if version != 1 {
+            return Err(Error::new(ErrorKind::InvalidInput, "Invalid version"));
+        }
+        Ok(Some(Box::new(Cascade {
+            filter: Bloom::from_bytes(&mut cursor)?,
+            child_layer: Cascade::from_bytes(cursor)?,
+        })))
     }
 
     fn new_layer(size: usize, n_hash_funcs: u32, layer: u32) -> Cascade {
@@ -207,9 +198,6 @@ mod tests {
     use Bloom;
     use Cascade;
 
-    use std::fs::File;
-    use std::io::{Cursor, Read};
-
     #[test]
     fn bloom_test_bloom_size() {
         let error_rate = 0.01;
@@ -255,7 +243,7 @@ mod tests {
             0x09, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x41, 0x00,
         ];
 
-        match Bloom::from_bytes(&mut Cursor::new(src)) {
+        match Bloom::from_bytes(&mut &src[..]) {
             Ok(mut bloom) => {
                 assert!(bloom.has(b"this") == true);
                 assert!(bloom.has(b"that") == true);
@@ -272,7 +260,7 @@ mod tests {
         let short: Vec<u8> = vec![
             0x09, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x41,
         ];
-        match Bloom::from_bytes(&mut Cursor::new(short)) {
+        match Bloom::from_bytes(&mut &short[..]) {
             Ok(_) => {
                 panic!("Parsing should fail; data is truncated");
             }
@@ -282,31 +270,11 @@ mod tests {
 
     #[test]
     fn bloom_test_from_file() {
-        let f = File::open("test_data/test_bf").unwrap();
-
-        let file_result: Result<Vec<u8>, _> = f.bytes().collect();
-        let mut v: Vec<u8> = vec![];
-        match file_result {
-            Ok(data) => {
-                for elem in data {
-                    v.push(elem);
-                }
-
-                match Bloom::from_bytes(&mut Cursor::new(v)) {
-                    Ok(bloom) => {
-                        assert!(bloom.has(b"this") == true);
-                        assert!(bloom.has(b"that") == true);
-                        assert!(bloom.has(b"yet another test") == false);
-                    }
-                    Err(_) => {
-                        panic!("Parsing failed");
-                    }
-                };
-            }
-            Err(err) => {
-                println!("Something went wrong! {:?}", err);
-            }
-        }
+        let v = include_bytes!("../test_data/test_bf");
+        let bloom = Bloom::from_bytes(&mut &v[..]).expect("parsing Bloom should succeed");
+        assert!(bloom.has(b"this") == true);
+        assert!(bloom.has(b"that") == true);
+        assert!(bloom.has(b"yet another test") == false);
     }
 
     #[test]
@@ -342,39 +310,18 @@ mod tests {
 
     #[test]
     fn cascade_from_file_bytes_test() {
-        let mut f = File::open("test_data/test_mlbf").unwrap();
+        let v = include_bytes!("../test_data/test_mlbf");
+        let cascade = Cascade::from_bytes(v)
+            .expect("parsing Cascade should succeed")
+            .expect("Cascade should be Some");
+        assert!(cascade.has(b"test") == true);
+        assert!(cascade.has(b"another test") == true);
+        assert!(cascade.has(b"yet another test") == true);
+        assert!(cascade.has(b"blah") == false);
+        assert!(cascade.has(b"blah blah") == false);
+        assert!(cascade.has(b"blah blah blah") == false);
 
-        let mut v: Vec<u8> = Vec::with_capacity(f.metadata().unwrap().len() as usize);
-        f.read_to_end(&mut v).unwrap();
-
-        let result = Cascade::from_bytes(&v);
-
-        match result {
-            Ok(opt) => match opt {
-                Some(cascade) => {
-                    assert!(cascade.has(b"test") == true);
-                    assert!(cascade.has(b"another test") == true);
-                    assert!(cascade.has(b"yet another test") == true);
-                    assert!(cascade.has(b"blah") == false);
-                    assert!(cascade.has(b"blah blah") == false);
-                    assert!(cascade.has(b"blah blah blah") == false);
-                }
-                None => {}
-            },
-            Err(_) => panic!("Parsing failed"),
-        }
-
-        let mut f = File::open("test_data/test_short_mlbf").unwrap();
-
-        let mut v: Vec<u8> = Vec::with_capacity(f.metadata().unwrap().len() as usize);
-        f.read_to_end(&mut v).unwrap();
-
-        let result = Cascade::from_bytes(&v);
-        match result {
-            Ok(_) => {
-                panic!("Parsing should fail");
-            }
-            Err(_) => {}
-        }
+        let v = include_bytes!("../test_data/test_short_mlbf");
+        Cascade::from_bytes(v).expect_err("parsing truncated Cascade should fail");
     }
 }
