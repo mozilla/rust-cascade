@@ -4,7 +4,7 @@ extern crate digest;
 extern crate murmurhash3;
 extern crate rand;
 
-use bitvec::{bitvec, BitVec, LittleEndian};
+use bitvec::prelude::{bitvec, BitVec, LittleEndian,};
 use byteorder::ReadBytesExt;
 use murmurhash3::murmurhash3_x86_32;
 
@@ -15,7 +15,7 @@ pub struct Bloom {
     level: u32,
     n_hash_funcs: u32,
     size: usize,
-    bitvec: BitVec<bitvec::LittleEndian>,
+    bitvec: BitVec<LittleEndian>,
 }
 
 pub fn calculate_n_hash_funcs(error_rate: f32) -> u32 {
