@@ -25,9 +25,9 @@ pub fn calculate_n_hash_funcs(error_rate: f32) -> u32 {
 pub fn calculate_size(elements: usize, error_rate: f32) -> usize {
     let n_hash_funcs = calculate_n_hash_funcs(error_rate);
     let hashes = n_hash_funcs as f32;
-    return (1.0_f32
+    (1.0_f32
         - (hashes * (elements as f32 + 0.5) / (1.0_f32 - error_rate.powf(1.0 / hashes)).ln()))
-    .ceil() as usize;
+    .ceil() as usize
 }
 
 impl Bloom {
@@ -116,7 +116,6 @@ impl Cascade {
         }
         let mut cursor = bytes;
         let version = cursor.read_u16::<byteorder::LittleEndian>()?;
-        println!("version is {:x} - {:x?}", version, bytes);
         if version != 1 {
             return Err(Error::new(ErrorKind::InvalidInput, "Invalid version"));
         }
