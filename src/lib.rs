@@ -61,13 +61,14 @@ impl Bloom {
         let mut bitvec_buf = vec![0u8; byte_count];
         cursor.read_exact(&mut bitvec_buf)?;
 
+        // swap the bits, since the bit order of our python libraries differs
         let v: Vec<u8> = bitvec_buf.into_iter().map(|x| x.swap_bits()).collect();
 
         Ok(Bloom {
             level,
             n_hash_funcs,
             size,
-            bitvec: BitVec::from_bytes(& v),
+            bitvec: BitVec::from_bytes(&v),
         })
     }
 
