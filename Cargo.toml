@@ -2,7 +2,7 @@
 name = "rust_cascade"
 description = "A simple mmh3 based bloom filter cascade implementation in Rust."
 license = "MPL-2.0"
-version = "0.3.2"
+version = "0.3.3"
 authors = ["Mark Goodwin <mgoodwin@mozilla.com>"]
 
 [dependencies]
