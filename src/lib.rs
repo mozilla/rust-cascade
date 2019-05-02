@@ -1,10 +1,12 @@
-extern crate bitvec;
+extern crate bit_reverse;
+extern crate bit_vec;
 extern crate byteorder;
 extern crate digest;
 extern crate murmurhash3;
 extern crate rand;
 
-use bitvec::{bitvec, BitVec, LittleEndian};
+use bit_reverse::ParallelReverse;
+use bit_vec::BitVec;
 use byteorder::ReadBytesExt;
 use murmurhash3::murmurhash3_x86_32;
 
@@ -15,7 +17,7 @@ pub struct Bloom {
     level: u32,
     n_hash_funcs: u32,
     size: usize,
-    bitvec: BitVec<bitvec::LittleEndian>,
+    bitvec: BitVec,
 }
 
 pub fn calculate_n_hash_funcs(error_rate: f32) -> u32 {
@@ -32,7 +34,7 @@ pub fn calculate_size(elements: usize, error_rate: f32) -> usize {
 
 impl Bloom {
     pub fn new(size: usize, n_hash_funcs: u32, level: u32) -> Bloom {
-        let bitvec: BitVec<LittleEndian> = bitvec![LittleEndian; 0; size];
+        let bitvec: BitVec = BitVec::from_elem(size, false);
 
         Bloom {
             level: level,
@@ -59,11 +61,14 @@ impl Bloom {
         let mut bitvec_buf = vec![0u8; byte_count];
         cursor.read_exact(&mut bitvec_buf)?;
 
+        // swap the bits, since the bit order of our python libraries differs
+        let v: Vec<u8> = bitvec_buf.into_iter().map(|x| x.swap_bits()).collect();
+
         Ok(Bloom {
             level,
             n_hash_funcs,
             size,
-            bitvec: bitvec_buf.into(),
+            bitvec: BitVec::from_bytes(&v),
         })
     }
 
