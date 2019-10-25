@@ -76,6 +76,8 @@ struct Bloom<'a> {
     bit_slice: BitSlice<'a>,
 }
 
+const HASH_ALGORITHM_MURMUR_3: u8 = 1;
+
 impl<'a> Bloom<'a> {
     /// Attempts to decode and return a pair that consists of the Bloom filter represented by the
     /// given bytes and any remaining unprocessed bytes in the given bytes.
@@ -84,18 +86,29 @@ impl<'a> Bloom<'a> {
     /// * `bytes` - The encoded representation of this Bloom filter. May include additional data
     /// describing further Bloom filters. Any additional data is returned unconsumed.
     /// The format of an encoded Bloom filter is:
+    /// [1 byte] - the hash algorithm to use in the filter
     /// [4 little endian bytes] - the length in bits of the filter
     /// [4 little endian bytes] - the number of hash functions to use in the filter
-    /// [4 little endian bytes] - which level in the cascade this filter is
+    /// [1 byte] - which level in the cascade this filter is
     /// [variable length bytes] - the filter itself (the length is determined by Ceiling(bit length
     /// / 8)
     pub fn from_bytes(bytes: &'a [u8]) -> Result<(Bloom<'a>, &'a [u8]), Error> {
         let mut cursor = bytes;
         // Load the layer metadata. bloomer.py writes size, nHashFuncs and level as little-endian
         // unsigned ints.
+        let hash_algorithm = cursor.read_u8()?;
+        if hash_algorithm != HASH_ALGORITHM_MURMUR_3 {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "Invalid Bloom filter: unsupported algorithm ({})",
+                    hash_algorithm
+                ),
+            ));
+        }
         let size = cursor.read_u32::<byteorder::LittleEndian>()? as usize;
         let n_hash_funcs = cursor.read_u32::<byteorder::LittleEndian>()?;
-        let level = cursor.read_u32::<byteorder::LittleEndian>()?;
+        let level = cursor.read_u8()? as u32;
 
         let shifted_size = size.wrapping_shr(3);
         let byte_count = if size % 8 != 0 {
@@ -165,7 +178,11 @@ impl<'a> Cascade<'a> {
         if version != 1 {
             return Err(Error::new(ErrorKind::InvalidData, "Invalid version"));
         }
-        let (filter, rest_of_bytes) = Bloom::from_bytes(cursor)?;
+        Cascade::child_layer_from_bytes(cursor)
+    }
+
+    fn child_layer_from_bytes(bytes: &'a [u8]) -> Result<Option<Box<Cascade<'a>>>, Error> {
+        let (filter, rest_of_bytes) = Bloom::from_bytes(bytes)?;
         Ok(Some(Box::new(Cascade {
             filter,
             child_layer: Cascade::from_bytes(rest_of_bytes)?,
