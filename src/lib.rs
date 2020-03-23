@@ -217,7 +217,7 @@ mod tests {
     use Cascade;
 
     #[test]
-    fn bloom_test_from_bytes() {
+    fn bloom_v1_test_from_bytes() {
         let src: Vec<u8> = vec![
             0x01, 0x09, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x41, 0x00,
         ];
@@ -241,8 +241,8 @@ mod tests {
     }
 
     #[test]
-    fn cascade_from_file_bytes_test() {
-        let v = include_bytes!("../test_data/test_mlbf");
+    fn cascade_v1_murmur_from_file_bytes_test() {
+        let v = include_bytes!("../test_data/test_v1_murmur_mlbf");
         let cascade = Cascade::from_bytes(v)
             .expect("parsing Cascade should succeed")
             .expect("Cascade should be Some");
@@ -271,7 +271,7 @@ mod tests {
               0x77, 0x8e ];
         assert!(!cascade.has(&key_for_valid_cert));
 
-        let v = include_bytes!("../test_data/test_short_mlbf");
+        let v = include_bytes!("../test_data/test_v1_murmur_short_mlbf");
         assert!(Cascade::from_bytes(v).is_err());
     }
 }
