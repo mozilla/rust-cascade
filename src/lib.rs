@@ -50,14 +50,14 @@ impl<'a> BitSlice<'a> {
         let final_bit_index = bit_index % 8;
         let byte = self.bytes[byte_index];
         let test_value = match final_bit_index {
-            0 => byte & 0b00000001u8,
-            1 => byte & 0b00000010u8,
-            2 => byte & 0b00000100u8,
-            3 => byte & 0b00001000u8,
-            4 => byte & 0b00010000u8,
-            5 => byte & 0b00100000u8,
-            6 => byte & 0b01000000u8,
-            7 => byte & 0b10000000u8,
+            0 => byte & 0b0000_0001u8,
+            1 => byte & 0b0000_0010u8,
+            2 => byte & 0b0000_0100u8,
+            3 => byte & 0b0000_1000u8,
+            4 => byte & 0b0001_0000u8,
+            5 => byte & 0b0010_0000u8,
+            6 => byte & 0b0100_0000u8,
+            7 => byte & 0b1000_0000u8,
             _ => panic!("impossible final_bit_index value: {}", final_bit_index),
         };
         test_value > 0
@@ -134,8 +134,7 @@ impl<'a> Bloom<'a> {
 
     fn hash(&self, n_fn: u32, key: &[u8]) -> usize {
         let hash_seed = (n_fn << 16) + self.level;
-        let h = murmurhash3_x86_32(key, hash_seed) as usize % self.size;
-        h
+        murmurhash3_x86_32(key, hash_seed) as usize % self.size
     }
 
     /// Test for the presence of a given sequence of bytes in this Bloom filter.
@@ -170,7 +169,7 @@ impl<'a> Cascade<'a> {
     /// little endian bytes indicating the version. The current version is 1. See the documentation
     /// for `Bloom`. May be of length 0, in which case `None` is returned.
     pub fn from_bytes(bytes: &'a [u8]) -> Result<Option<Box<Cascade<'a>>>, Error> {
-        if bytes.len() == 0 {
+        if bytes.is_empty() {
             return Ok(None);
         }
         let mut cursor = bytes;
@@ -182,7 +181,7 @@ impl<'a> Cascade<'a> {
     }
 
     fn child_layer_from_bytes(bytes: &'a [u8]) -> Result<Option<Box<Cascade<'a>>>, Error> {
-        if bytes.len() == 0 {
+        if bytes.is_empty() {
             return Ok(None);
         }
         let (filter, rest_of_bytes) = Bloom::from_bytes(bytes)?;
@@ -208,7 +207,7 @@ impl<'a> Cascade<'a> {
                 }
             }
         }
-        return false;
+        false
     }
 }
 
