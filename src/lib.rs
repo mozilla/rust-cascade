@@ -241,6 +241,12 @@ mod tests {
     }
 
     #[test]
+    fn bloom_v3_unsupported() {
+        let src: Vec<u8> = vec![0x03, 0x01, 0x00];
+        assert!(Bloom::from_bytes(&src).is_err());
+    }
+
+    #[test]
     fn cascade_v1_murmur_from_file_bytes_test() {
         let v = include_bytes!("../test_data/test_v1_murmur_mlbf");
         let cascade = Cascade::from_bytes(v)
