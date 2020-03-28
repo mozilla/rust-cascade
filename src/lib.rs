@@ -143,14 +143,14 @@ impl<'a> Bloom<'a> {
         Ok((bloom, rest_of_bytes))
     }
 
-    fn hash(&self, n_fn: u32, key: &[u8], salt: Option<&'a [u8]>) -> u32 {
+    fn hash(&self, n_fn: u32, key: &[u8], salt: Option<&[u8]>) -> u32 {
         match self.hash_algorithm {
             HASH_ALGORITHM_MURMUR_3 => {
                 if salt.is_some() {
                     panic!("murmur does not support salts")
                 }
                 let hash_seed = (n_fn << 16) + self.level as u32;
-                murmurhash3_x86_32(key, hash_seed) as u32 % self.size
+                murmurhash3_x86_32(key, hash_seed) % self.size
             }
             HASH_ALGORITHM_SHA256 => {
                 let mut hasher = Sha256::new();
@@ -178,7 +178,7 @@ impl<'a> Bloom<'a> {
     ///
     /// # Arguments
     /// `item` - The slice of bytes to test for
-    pub fn has(&self, item: &[u8], salt: Option<&'a [u8]>) -> bool {
+    pub fn has(&self, item: &[u8], salt: Option<&[u8]>) -> bool {
         for i in 0..self.n_hash_funcs {
             if !self.bit_slice.get(self.hash(i, item, salt) as usize) {
                 return false;
@@ -189,11 +189,10 @@ impl<'a> Bloom<'a> {
 }
 
 impl<'a> fmt::Display for Bloom<'a> {
-    // This trait requires `fmt` with this exact signature.
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "level={} nFuncs={} algo={} sz={}",
+            "level={} n_hash_funcs={} hash_algorithm={} size={}",
             self.level, self.n_hash_funcs, self.hash_algorithm, self.size
         )
     }
@@ -306,7 +305,6 @@ impl<'a> Cascade<'a> {
 }
 
 impl<'a> fmt::Display for Cascade<'a> {
-    // This trait requires `fmt` with this exact signature.
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
