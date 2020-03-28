@@ -13,7 +13,8 @@ def predictable_serial_gen(end):
 
 
 def store(fc, path):
-    path.unlink()
+    if path.exists():
+        path.unlink()
     with open(path, "wb") as f:
         fc.tofile(f)
 
@@ -26,19 +27,19 @@ v2_sha256_with_salt = filtercascade.FilterCascade(
 v2_sha256_with_salt.initialize(
     include=[b"this", b"that"], exclude=large_set | set([b"other"])
 )
-store(v2_sha256_with_salt, Path("/tmp/test_v2_sha256_salt_mlbf"))
+store(v2_sha256_with_salt, Path("test_v2_sha256_salt_mlbf"))
 
 v2_sha256 = filtercascade.FilterCascade(
     [], defaultHashAlg=filtercascade.fileformats.HashAlgorithm.SHA256
 )
 v2_sha256.initialize(include=[b"this", b"that"], exclude=large_set | set([b"other"]))
-store(v2_sha256, Path("/tmp/test_v2_sha256_mlbf"))
+store(v2_sha256, Path("test_v2_sha256_mlbf"))
 
 v2_murmur = filtercascade.FilterCascade(
     [], defaultHashAlg=filtercascade.fileformats.HashAlgorithm.MURMUR3
 )
 v2_murmur.initialize(include=[b"this", b"that"], exclude=large_set | set([b"other"]))
-store(v2_murmur, Path("/tmp/test_v2_murmur_mlbf"))
+store(v2_murmur, Path("test_v2_murmur_mlbf"))
 
 v2_murmur_inverted = filtercascade.FilterCascade(
     [], defaultHashAlg=filtercascade.fileformats.HashAlgorithm.MURMUR3
@@ -46,7 +47,7 @@ v2_murmur_inverted = filtercascade.FilterCascade(
 v2_murmur_inverted.initialize(
     include=large_set | set([b"this", b"that"]), exclude=[b"other"]
 )
-store(v2_murmur_inverted, Path("/tmp/test_v2_murmur_inverted_mlbf"))
+store(v2_murmur_inverted, Path("test_v2_murmur_inverted_mlbf"))
 
 
 v2_sha256_inverted = filtercascade.FilterCascade(
@@ -55,4 +56,4 @@ v2_sha256_inverted = filtercascade.FilterCascade(
 v2_sha256_inverted.initialize(
     include=large_set | set([b"this", b"that"]), exclude=[b"other"]
 )
-store(v2_sha256_inverted, Path("/tmp/test_v2_sha256_inverted_mlbf"))
+store(v2_sha256_inverted, Path("test_v2_sha256_inverted_mlbf"))
