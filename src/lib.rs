@@ -6,7 +6,7 @@ extern crate sha2;
 use byteorder::ReadBytesExt;
 use murmurhash3::murmurhash3_x86_32;
 use sha2::{Digest, Sha256};
-use std::convert::TryInto;
+use std::convert::{TryFrom, TryInto};
 use std::fmt;
 use std::io::{Error, ErrorKind};
 
@@ -78,11 +78,35 @@ struct Bloom<'a> {
     /// The data of the filter
     bit_slice: BitSlice<'a>,
     /// The hash algorithm enumeration in use
-    hash_algorithm: u8,
+    hash_algorithm: HashAlgorithm,
 }
 
-const HASH_ALGORITHM_MURMUR_3: u8 = 1;
-const HASH_ALGORITHM_SHA256: u8 = 2;
+#[repr(u8)]
+#[derive(Copy, Clone)]
+/// These enumerations need to match the python filter-cascade project:
+/// https://github.com/mozilla/filter-cascade/blob/master/filtercascade/fileformats.py
+enum HashAlgorithm {
+    MurmurHash3 = 1,
+    Sha256 = 2,
+}
+
+impl fmt::Display for HashAlgorithm {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", *self as u8)
+    }
+}
+
+impl TryFrom<u8> for HashAlgorithm {
+    type Error = ();
+    fn try_from(value: u8) -> Result<HashAlgorithm, ()> {
+        match value {
+            // Naturally, these need to match the enum declaration
+            1 => Ok(Self::MurmurHash3),
+            2 => Ok(Self::Sha256),
+            _ => Err(()),
+        }
+    }
+}
 
 impl<'a> Bloom<'a> {
     /// Attempts to decode and return a pair that consists of the Bloom filter represented by the
@@ -102,19 +126,16 @@ impl<'a> Bloom<'a> {
         let mut cursor = bytes;
         // Load the layer metadata. bloomer.py writes size, nHashFuncs and level as little-endian
         // unsigned ints.
-        let hash_algorithm = cursor.read_u8()?;
-        match hash_algorithm {
-            HASH_ALGORITHM_MURMUR_3 | HASH_ALGORITHM_SHA256 => {}
-            _ => {
+        let hash_algorithm_val = cursor.read_u8()?;
+        let hash_algorithm = match HashAlgorithm::try_from(hash_algorithm_val) {
+            Ok(algo) => algo,
+            Err(()) => {
                 return Err(Error::new(
                     ErrorKind::InvalidData,
-                    format!(
-                        "Invalid Bloom filter: unsupported algorithm ({})",
-                        hash_algorithm
-                    ),
+                    "Unexpected hash algorithm",
                 ))
             }
-        }
+        };
 
         let size = cursor.read_u32::<byteorder::LittleEndian>()?;
         let n_hash_funcs = cursor.read_u32::<byteorder::LittleEndian>()?;
@@ -145,14 +166,14 @@ impl<'a> Bloom<'a> {
 
     fn hash(&self, n_fn: u32, key: &[u8], salt: Option<&[u8]>) -> u32 {
         match self.hash_algorithm {
-            HASH_ALGORITHM_MURMUR_3 => {
+            HashAlgorithm::MurmurHash3 => {
                 if salt.is_some() {
                     panic!("murmur does not support salts")
                 }
                 let hash_seed = (n_fn << 16) + self.level as u32;
                 murmurhash3_x86_32(key, hash_seed) % self.size
             }
-            HASH_ALGORITHM_SHA256 => {
+            HashAlgorithm::Sha256 => {
                 let mut hasher = Sha256::new();
                 if let Some(salt_bytes) = salt {
                     hasher.input(salt_bytes)
@@ -167,10 +188,6 @@ impl<'a> Bloom<'a> {
                         .expect("sha256 should have given enough bytes"),
                 ) % self.size
             }
-            _ => panic!(
-                "Invalid Bloom filter: unsupported algorithm ({})",
-                self.hash_algorithm
-            ),
         }
     }
 
