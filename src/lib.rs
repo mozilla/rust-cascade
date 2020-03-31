@@ -84,7 +84,7 @@ struct Bloom<'a> {
 #[repr(u8)]
 #[derive(Copy, Clone)]
 /// These enumerations need to match the python filter-cascade project:
-/// https://github.com/mozilla/filter-cascade/blob/master/filtercascade/fileformats.py
+/// https://github.com/mozilla/filter-cascade/blob/v0.3.0/filtercascade/fileformats.py
 enum HashAlgorithm {
     MurmurHash3 = 1,
     Sha256 = 2,
@@ -236,7 +236,7 @@ impl<'a> Cascade<'a> {
     /// `bytes` - The encoded representation of the Bloom filters in this cascade. Starts with 2
     /// little endian bytes indicating the version. The current version is 2. The Python
     /// filter-cascade project defines the formats, see
-    /// https://github.com/mozilla/filter-cascade/blob/master/filtercascade/fileformats.py
+    /// https://github.com/mozilla/filter-cascade/blob/v0.3.0/filtercascade/fileformats.py
     ///
     /// May be of length 0, in which case `None` is returned.
     pub fn from_bytes(bytes: &'a [u8]) -> Result<Option<Box<Cascade<'a>>>, Error> {
