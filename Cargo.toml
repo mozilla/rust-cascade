@@ -1,8 +1,8 @@
 [package]
 name = "rust_cascade"
-description = "A simple mmh3 based bloom filter cascade implementation in Rust."
+description = "A simple bloom filter cascade implementation in Rust."
 license = "MPL-2.0"
-version = "0.6.0"
+version = "1.0.0"
 authors = ["Mark Goodwin <mgoodwin@mozilla.com>", "Dana Keeler <dkeeler@mozilla.com>", "J.C. Jones <jc@mozilla.com>"]
 documentation = "https://docs.rs/rust_cascade/"
 homepage = "https://github.com/mozilla/rust-cascade"
