@@ -1,9 +1,14 @@
 extern crate byteorder;
 extern crate digest;
+extern crate malloc_size_of_derive;
 extern crate murmurhash3;
 extern crate sha2;
+extern crate wr_malloc_size_of;
+
+use wr_malloc_size_of as malloc_size_of;
 
 use byteorder::ReadBytesExt;
+use malloc_size_of_derive::MallocSizeOf;
 use murmurhash3::murmurhash3_x86_32;
 use sha2::{Digest, Sha256};
 use std::convert::{TryFrom, TryInto};
@@ -11,6 +16,7 @@ use std::fmt;
 use std::io::{Error, ErrorKind, Read};
 
 /// Helper struct to provide read-only bit access to a vector of bytes.
+#[derive(MallocSizeOf)]
 struct BitVector {
     /// The bytes we're interested in.
     bytes: Vec<u8>,
@@ -68,6 +74,7 @@ impl BitVector {
 }
 
 /// A Bloom filter representing a specific level in a multi-level cascading Bloom filter.
+#[derive(MallocSizeOf)]
 struct Bloom {
     /// What level this filter is in
     level: u8,
@@ -85,6 +92,7 @@ struct Bloom {
 #[derive(Copy, Clone)]
 /// These enumerations need to match the python filter-cascade project:
 /// https://github.com/mozilla/filter-cascade/blob/v0.3.0/filtercascade/fileformats.py
+#[derive(MallocSizeOf)]
 enum HashAlgorithm {
     MurmurHash3 = 1,
     Sha256 = 2,
@@ -214,6 +222,7 @@ impl fmt::Display for Bloom {
 }
 
 /// A multi-level cascading Bloom filter.
+#[derive(MallocSizeOf)]
 pub struct Cascade {
     /// The Bloom filter for this level in the cascade
     filter: Bloom,
