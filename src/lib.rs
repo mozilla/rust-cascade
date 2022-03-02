@@ -1,22 +1,17 @@
 extern crate byteorder;
 extern crate digest;
-extern crate malloc_size_of_derive;
 extern crate murmurhash3;
 extern crate sha2;
-extern crate wr_malloc_size_of;
-
-use wr_malloc_size_of as malloc_size_of;
 
 use byteorder::ReadBytesExt;
-use malloc_size_of_derive::MallocSizeOf;
 use murmurhash3::murmurhash3_x86_32;
 use sha2::{Digest, Sha256};
 use std::convert::{TryFrom, TryInto};
 use std::fmt;
 use std::io::{Error, ErrorKind, Read};
+use std::mem::size_of;
 
 /// Helper struct to provide read-only bit access to a vector of bytes.
-#[derive(MallocSizeOf)]
 struct BitVector {
     /// The bytes we're interested in.
     bytes: Vec<u8>,
@@ -71,10 +66,15 @@ impl BitVector {
         };
         test_value > 0
     }
+
+    /// Determine the approximate amount of memory used by this BitVector.
+    /// See the caveat in Cascade::approximate_size.
+    fn approximate_size(&self) -> usize {
+        self.bytes.len() + size_of::<usize>()
+    }
 }
 
 /// A Bloom filter representing a specific level in a multi-level cascading Bloom filter.
-#[derive(MallocSizeOf)]
 struct Bloom {
     /// What level this filter is in
     level: u8,
@@ -92,7 +92,6 @@ struct Bloom {
 #[derive(Copy, Clone)]
 /// These enumerations need to match the python filter-cascade project:
 /// https://github.com/mozilla/filter-cascade/blob/v0.3.0/filtercascade/fileformats.py
-#[derive(MallocSizeOf)]
 enum HashAlgorithm {
     MurmurHash3 = 1,
     Sha256 = 2,
@@ -209,6 +208,16 @@ impl Bloom {
         }
         true
     }
+
+    /// Determine the approximate amount of memory used by this Bloom.
+    /// See the caveat in Cascade::approximate_size.
+    fn approximate_size(&self) -> usize {
+        size_of::<u8>()
+            + size_of::<u32>()
+            + size_of::<u32>()
+            + self.bit_vector.approximate_size()
+            + size_of::<HashAlgorithm>()
+    }
 }
 
 impl fmt::Display for Bloom {
@@ -222,7 +231,6 @@ impl fmt::Display for Bloom {
 }
 
 /// A multi-level cascading Bloom filter.
-#[derive(MallocSizeOf)]
 pub struct Cascade {
     /// The Bloom filter for this level in the cascade
     filter: Bloom,
@@ -317,6 +325,22 @@ impl Cascade {
         }
         false
     }
+
+    /// Determine the approximate amount of memory in bytes used by this
+    /// Cascade. Because this implementation does not integrate with the
+    /// allocator, it can't get an accurate measurement of how much memory it
+    /// uses. However, it can make a reasonable guess, assuming the sizes of
+    /// the bloom filters are large enough to dominate the overall allocated
+    /// size.
+    pub fn approximate_size(&self) -> usize {
+        self.filter.approximate_size()
+            + self
+                .child_layer
+                .as_ref()
+                .map_or(0, |child_layer| child_layer.approximate_size())
+            + self.salt.as_ref().map_or(0, |salt| salt.len())
+            + size_of::<bool>()
+    }
 }
 
 impl fmt::Display for Cascade {
@@ -350,6 +374,7 @@ mod tests {
                 assert!(bloom.has(b"this", None) == true);
                 assert!(bloom.has(b"that", None) == true);
                 assert!(bloom.has(b"other", None) == false);
+                assert_eq!(bloom.approximate_size(), 20);
             }
             Ok(None) => panic!("Parsing failed"),
             Err(_) => panic!("Parsing failed"),
@@ -406,6 +431,8 @@ mod tests {
               0x77, 0x8e ];
         assert!(!cascade.has(&key_for_valid_cert));
 
+        assert_eq!(cascade.approximate_size(), 15287);
+
         let v = include_bytes!("../test_data/test_v1_murmur_short_mlbf").to_vec();
         assert!(Cascade::from_bytes(v).is_err());
     }
@@ -422,6 +449,7 @@ mod tests {
         assert!(cascade.has(b"this") == true);
         assert!(cascade.has(b"that") == true);
         assert!(cascade.has(b"other") == false);
+        assert_eq!(cascade.approximate_size(), 10178);
     }
 
     #[test]
@@ -436,6 +464,7 @@ mod tests {
         assert!(cascade.has(b"this") == true);
         assert!(cascade.has(b"that") == true);
         assert!(cascade.has(b"other") == false);
+        assert_eq!(cascade.approximate_size(), 10182);
     }
 
     #[test]
@@ -450,6 +479,7 @@ mod tests {
         assert!(cascade.has(b"this") == true);
         assert!(cascade.has(b"that") == true);
         assert!(cascade.has(b"other") == false);
+        assert_eq!(cascade.approximate_size(), 10178);
     }
 
     #[test]
@@ -464,6 +494,7 @@ mod tests {
         assert!(cascade.has(b"this") == true);
         assert!(cascade.has(b"that") == true);
         assert!(cascade.has(b"other") == false);
+        assert_eq!(cascade.approximate_size(), 10178);
     }
 
     #[test]
@@ -478,6 +509,7 @@ mod tests {
         assert!(cascade.has(b"this") == true);
         assert!(cascade.has(b"that") == true);
         assert!(cascade.has(b"other") == false);
+        assert_eq!(cascade.approximate_size(), 10178);
     }
 
     #[test]
