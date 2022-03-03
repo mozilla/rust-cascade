@@ -66,12 +66,6 @@ impl BitVector {
         };
         test_value > 0
     }
-
-    /// Determine the approximate amount of memory used by this BitVector.
-    /// See the caveat in Cascade::approximate_size.
-    fn approximate_size(&self) -> usize {
-        self.bytes.len() + size_of::<usize>()
-    }
 }
 
 /// A Bloom filter representing a specific level in a multi-level cascading Bloom filter.
@@ -208,16 +202,6 @@ impl Bloom {
         }
         true
     }
-
-    /// Determine the approximate amount of memory used by this Bloom.
-    /// See the caveat in Cascade::approximate_size.
-    fn approximate_size(&self) -> usize {
-        size_of::<u8>()
-            + size_of::<u32>()
-            + size_of::<u32>()
-            + self.bit_vector.approximate_size()
-            + size_of::<HashAlgorithm>()
-    }
 }
 
 impl fmt::Display for Bloom {
@@ -332,14 +316,14 @@ impl Cascade {
     /// uses. However, it can make a reasonable guess, assuming the sizes of
     /// the bloom filters are large enough to dominate the overall allocated
     /// size.
-    pub fn approximate_size(&self) -> usize {
-        self.filter.approximate_size()
+    pub fn approximate_size_of(&self) -> usize {
+        size_of::<Cascade>()
+            + self.filter.bit_vector.bytes.len()
             + self
                 .child_layer
                 .as_ref()
-                .map_or(0, |child_layer| child_layer.approximate_size())
+                .map_or(0, |child_layer| child_layer.approximate_size_of())
             + self.salt.as_ref().map_or(0, |salt| salt.len())
-            + size_of::<bool>()
     }
 }
 
@@ -374,7 +358,6 @@ mod tests {
                 assert!(bloom.has(b"this", None) == true);
                 assert!(bloom.has(b"that", None) == true);
                 assert!(bloom.has(b"other", None) == false);
-                assert_eq!(bloom.approximate_size(), 20);
             }
             Ok(None) => panic!("Parsing failed"),
             Err(_) => panic!("Parsing failed"),
@@ -431,7 +414,7 @@ mod tests {
               0x77, 0x8e ];
         assert!(!cascade.has(&key_for_valid_cert));
 
-        assert_eq!(cascade.approximate_size(), 15287);
+        assert_eq!(cascade.approximate_size_of(), 15632);
 
         let v = include_bytes!("../test_data/test_v1_murmur_short_mlbf").to_vec();
         assert!(Cascade::from_bytes(v).is_err());
@@ -449,7 +432,7 @@ mod tests {
         assert!(cascade.has(b"this") == true);
         assert!(cascade.has(b"that") == true);
         assert!(cascade.has(b"other") == false);
-        assert_eq!(cascade.approximate_size(), 10178);
+        assert_eq!(cascade.approximate_size_of(), 10247);
     }
 
     #[test]
@@ -464,7 +447,7 @@ mod tests {
         assert!(cascade.has(b"this") == true);
         assert!(cascade.has(b"that") == true);
         assert!(cascade.has(b"other") == false);
-        assert_eq!(cascade.approximate_size(), 10182);
+        assert_eq!(cascade.approximate_size_of(), 10251);
     }
 
     #[test]
@@ -479,7 +462,7 @@ mod tests {
         assert!(cascade.has(b"this") == true);
         assert!(cascade.has(b"that") == true);
         assert!(cascade.has(b"other") == false);
-        assert_eq!(cascade.approximate_size(), 10178);
+        assert_eq!(cascade.approximate_size_of(), 10247);
     }
 
     #[test]
@@ -494,7 +477,7 @@ mod tests {
         assert!(cascade.has(b"this") == true);
         assert!(cascade.has(b"that") == true);
         assert!(cascade.has(b"other") == false);
-        assert_eq!(cascade.approximate_size(), 10178);
+        assert_eq!(cascade.approximate_size_of(), 10247);
     }
 
     #[test]
@@ -509,7 +492,7 @@ mod tests {
         assert!(cascade.has(b"this") == true);
         assert!(cascade.has(b"that") == true);
         assert!(cascade.has(b"other") == false);
-        assert_eq!(cascade.approximate_size(), 10178);
+        assert_eq!(cascade.approximate_size_of(), 10247);
     }
 
     #[test]
