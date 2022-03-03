@@ -1,22 +1,17 @@
 extern crate byteorder;
 extern crate digest;
-extern crate malloc_size_of_derive;
 extern crate murmurhash3;
 extern crate sha2;
-extern crate wr_malloc_size_of;
-
-use wr_malloc_size_of as malloc_size_of;
 
 use byteorder::ReadBytesExt;
-use malloc_size_of_derive::MallocSizeOf;
 use murmurhash3::murmurhash3_x86_32;
 use sha2::{Digest, Sha256};
 use std::convert::{TryFrom, TryInto};
 use std::fmt;
 use std::io::{Error, ErrorKind, Read};
+use std::mem::size_of;
 
 /// Helper struct to provide read-only bit access to a vector of bytes.
-#[derive(MallocSizeOf)]
 struct BitVector {
     /// The bytes we're interested in.
     bytes: Vec<u8>,
@@ -74,7 +69,6 @@ impl BitVector {
 }
 
 /// A Bloom filter representing a specific level in a multi-level cascading Bloom filter.
-#[derive(MallocSizeOf)]
 struct Bloom {
     /// What level this filter is in
     level: u8,
@@ -92,7 +86,6 @@ struct Bloom {
 #[derive(Copy, Clone)]
 /// These enumerations need to match the python filter-cascade project:
 /// https://github.com/mozilla/filter-cascade/blob/v0.3.0/filtercascade/fileformats.py
-#[derive(MallocSizeOf)]
 enum HashAlgorithm {
     MurmurHash3 = 1,
     Sha256 = 2,
@@ -222,7 +215,6 @@ impl fmt::Display for Bloom {
 }
 
 /// A multi-level cascading Bloom filter.
-#[derive(MallocSizeOf)]
 pub struct Cascade {
     /// The Bloom filter for this level in the cascade
     filter: Bloom,
@@ -317,6 +309,22 @@ impl Cascade {
         }
         false
     }
+
+    /// Determine the approximate amount of memory in bytes used by this
+    /// Cascade. Because this implementation does not integrate with the
+    /// allocator, it can't get an accurate measurement of how much memory it
+    /// uses. However, it can make a reasonable guess, assuming the sizes of
+    /// the bloom filters are large enough to dominate the overall allocated
+    /// size.
+    pub fn approximate_size_of(&self) -> usize {
+        size_of::<Cascade>()
+            + self.filter.bit_vector.bytes.len()
+            + self
+                .child_layer
+                .as_ref()
+                .map_or(0, |child_layer| child_layer.approximate_size_of())
+            + self.salt.as_ref().map_or(0, |salt| salt.len())
+    }
 }
 
 impl fmt::Display for Cascade {
@@ -406,6 +414,8 @@ mod tests {
               0x77, 0x8e ];
         assert!(!cascade.has(&key_for_valid_cert));
 
+        assert_eq!(cascade.approximate_size_of(), 15632);
+
         let v = include_bytes!("../test_data/test_v1_murmur_short_mlbf").to_vec();
         assert!(Cascade::from_bytes(v).is_err());
     }
@@ -422,6 +432,7 @@ mod tests {
         assert!(cascade.has(b"this") == true);
         assert!(cascade.has(b"that") == true);
         assert!(cascade.has(b"other") == false);
+        assert_eq!(cascade.approximate_size_of(), 10247);
     }
 
     #[test]
@@ -436,6 +447,7 @@ mod tests {
         assert!(cascade.has(b"this") == true);
         assert!(cascade.has(b"that") == true);
         assert!(cascade.has(b"other") == false);
+        assert_eq!(cascade.approximate_size_of(), 10251);
     }
 
     #[test]
@@ -450,6 +462,7 @@ mod tests {
         assert!(cascade.has(b"this") == true);
         assert!(cascade.has(b"that") == true);
         assert!(cascade.has(b"other") == false);
+        assert_eq!(cascade.approximate_size_of(), 10247);
     }
 
     #[test]
@@ -464,6 +477,7 @@ mod tests {
         assert!(cascade.has(b"this") == true);
         assert!(cascade.has(b"that") == true);
         assert!(cascade.has(b"other") == false);
+        assert_eq!(cascade.approximate_size_of(), 10247);
     }
 
     #[test]
@@ -478,6 +492,7 @@ mod tests {
         assert!(cascade.has(b"this") == true);
         assert!(cascade.has(b"that") == true);
         assert!(cascade.has(b"other") == false);
+        assert_eq!(cascade.approximate_size_of(), 10247);
     }
 
     #[test]
