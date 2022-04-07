@@ -2,7 +2,7 @@ extern crate byteorder;
 extern crate murmurhash3;
 extern crate sha2;
 
-use byteorder::ReadBytesExt;
+use byteorder::{ByteOrder, LittleEndian, ReadBytesExt};
 use murmurhash3::murmurhash3_x86_32;
 use sha2::{Digest, Sha256};
 use std::convert::{TryFrom, TryInto};
@@ -87,7 +87,8 @@ struct Bloom {
 /// https://github.com/mozilla/filter-cascade/blob/v0.3.0/filtercascade/fileformats.py
 enum HashAlgorithm {
     MurmurHash3 = 1,
-    Sha256l32 = 2, // sha256 restricted to the low 32 bits
+    Sha256l32 = 2, // low 32 bits of sha256
+    Sha256 = 3,    // all 256 bits of sha256
 }
 
 impl fmt::Display for HashAlgorithm {
@@ -103,6 +104,7 @@ impl TryFrom<u8> for HashAlgorithm {
             // Naturally, these need to match the enum declaration
             1 => Ok(Self::MurmurHash3),
             2 => Ok(Self::Sha256l32),
+            3 => Ok(Self::Sha256),
             _ => Err(()),
         }
     }
@@ -181,6 +183,51 @@ impl<'a> CascadeIndexGenerator for SHA256l32IndexGenerator<'a> {
         self.counter = 0;
         self.depth += 1
     }
+}
+
+struct SHA256CtrIndexGenerator<'a> {
+    salt: &'a [u8],
+    key: &'a [u8],
+    counter: u32,
+    state: [u8; 32],
+    state_available: usize,
+}
+
+impl<'a> SHA256CtrIndexGenerator<'a> {
+    fn new(salt: &'a [u8], key: &'a [u8]) -> Self {
+        SHA256CtrIndexGenerator {
+            salt: salt,
+            key: key,
+            counter: 0,
+            state: [0; 32],
+            state_available: 0,
+        }
+    }
+}
+
+impl<'a> CascadeIndexGenerator for SHA256CtrIndexGenerator<'a> {
+    fn next_index(&mut self, range: usize) -> usize {
+        // |bytes_needed| is the minimum number of bytes needed to represent a value in [0, range).
+        let bytes_needed = ((range.next_power_of_two().trailing_zeros() + 7) / 8) as usize;
+        let mut index_arr = [0u8; 4];
+        for i in 0..bytes_needed {
+            if self.state_available == 0 {
+                let mut hasher = Sha256::new();
+                hasher.update(self.counter.to_le_bytes());
+                hasher.update(&self.salt);
+                hasher.update(&self.key);
+                let digest = &hasher.finalize()[..];
+                self.state.copy_from_slice(digest);
+                self.state_available = 32;
+                self.counter += 1;
+            }
+            index_arr[i] = self.state[32 - self.state_available];
+            self.state_available -= 1;
+        }
+        let index = LittleEndian::read_u32(&index_arr) as usize;
+        index % range
+    }
+    fn next_layer(&mut self) {}
 }
 
 impl Bloom {
@@ -337,6 +384,9 @@ impl Cascade {
             }
             HashAlgorithm::Sha256l32 => {
                 self.has_internal(&mut SHA256l32IndexGenerator::new(&self.salt, entry))
+            }
+            HashAlgorithm::Sha256 => {
+                self.has_internal(&mut SHA256CtrIndexGenerator::new(&self.salt, entry))
             }
         };
         if self.inverted {
