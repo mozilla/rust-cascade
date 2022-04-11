@@ -74,7 +74,7 @@ struct Bloom {
     /// How many hash functions this filter uses
     n_hash_funcs: u32,
     /// The bit length of the filter
-    size: usize,
+    size: u32,
     /// The data of the filter
     bit_vector: BitVector,
     /// The hash algorithm enumeration in use
@@ -111,7 +111,7 @@ impl TryFrom<u8> for HashAlgorithm {
 }
 
 trait CascadeIndexGenerator {
-    fn next_index(&mut self, range: usize) -> usize;
+    fn next_index(&mut self, range: u32) -> u32;
     fn next_layer(&mut self);
 }
 
@@ -124,7 +124,7 @@ struct MurmurHash3IndexGenerator<'a> {
 impl<'a> MurmurHash3IndexGenerator<'a> {
     fn new(key: &'a [u8]) -> Self {
         MurmurHash3IndexGenerator {
-            key: key,
+            key,
             counter: 0,
             depth: 1,
         }
@@ -132,10 +132,10 @@ impl<'a> MurmurHash3IndexGenerator<'a> {
 }
 
 impl<'a> CascadeIndexGenerator for MurmurHash3IndexGenerator<'a> {
-    fn next_index(&mut self, range: usize) -> usize {
-        let hash_seed = (self.counter << 16) + self.depth as u32;
+    fn next_index(&mut self, range: u32) -> u32 {
+        let hash_seed = (self.counter << 16) + self.depth;
         self.counter += 1;
-        let index = murmurhash3_x86_32(self.key, hash_seed) as usize;
+        let index = murmurhash3_x86_32(self.key, hash_seed);
         index % range
     }
     fn next_layer(&mut self) {
@@ -154,8 +154,8 @@ struct SHA256l32IndexGenerator<'a> {
 impl<'a> SHA256l32IndexGenerator<'a> {
     fn new(salt: &'a [u8], key: &'a [u8]) -> Self {
         SHA256l32IndexGenerator {
-            salt: salt,
-            key: key,
+            salt,
+            key,
             counter: 0,
             depth: 1,
         }
@@ -163,7 +163,7 @@ impl<'a> SHA256l32IndexGenerator<'a> {
 }
 
 impl<'a> CascadeIndexGenerator for SHA256l32IndexGenerator<'a> {
-    fn next_index(&mut self, range: usize) -> usize {
+    fn next_index(&mut self, range: u32) -> u32 {
         let mut hasher = Sha256::new();
         if self.salt.len() > 0 {
             hasher.update(self.salt)
@@ -176,7 +176,7 @@ impl<'a> CascadeIndexGenerator for SHA256l32IndexGenerator<'a> {
             hasher.finalize()[0..4]
                 .try_into()
                 .expect("sha256 should have given enough bytes"),
-        ) as usize;
+        );
         index % range
     }
     fn next_layer(&mut self) {
@@ -196,8 +196,8 @@ struct SHA256CtrIndexGenerator<'a> {
 impl<'a> SHA256CtrIndexGenerator<'a> {
     fn new(salt: &'a [u8], key: &'a [u8]) -> Self {
         SHA256CtrIndexGenerator {
-            salt: salt,
-            key: key,
+            salt,
+            key,
             counter: 0,
             state: [0; 32],
             state_available: 0,
@@ -206,7 +206,7 @@ impl<'a> SHA256CtrIndexGenerator<'a> {
 }
 
 impl<'a> CascadeIndexGenerator for SHA256CtrIndexGenerator<'a> {
-    fn next_index(&mut self, range: usize) -> usize {
+    fn next_index(&mut self, range: u32) -> u32 {
         // |bytes_needed| is the minimum number of bytes needed to represent a value in [0, range).
         let bytes_needed = ((range.next_power_of_two().trailing_zeros() + 7) / 8) as usize;
         let mut index_arr = [0u8; 4];
@@ -224,7 +224,7 @@ impl<'a> CascadeIndexGenerator for SHA256CtrIndexGenerator<'a> {
             index_arr[i] = self.state[32 - self.state_available];
             self.state_available -= 1;
         }
-        let index = LittleEndian::read_u32(&index_arr) as usize;
+        let index = LittleEndian::read_u32(&index_arr);
         index % range
     }
     fn next_layer(&mut self) {}
@@ -262,7 +262,7 @@ impl Bloom {
             }
         };
 
-        let size = reader.read_u32::<byteorder::LittleEndian>()? as usize;
+        let size = reader.read_u32::<byteorder::LittleEndian>()?;
         let n_hash_funcs = reader.read_u32::<byteorder::LittleEndian>()?;
         let level = reader.read_u8()?;
 
@@ -285,12 +285,15 @@ impl Bloom {
     /// `item` - The slice of bytes to test for
     fn has<T: CascadeIndexGenerator>(&self, generator: &mut T) -> bool {
         for _ in 0..self.n_hash_funcs {
-            if !self.bit_vector.get(generator.next_index(self.size)) {
+            if !self
+                .bit_vector
+                .get(generator.next_index(self.size) as usize)
+            {
                 return false;
             }
         }
         generator.next_layer();
-        return true;
+        true
     }
 }
 
