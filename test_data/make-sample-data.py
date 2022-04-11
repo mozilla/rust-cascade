@@ -91,3 +91,16 @@ v2_sha256l32_inverted.initialize(
     include=large_set | set([b"this", b"that"]), exclude=[b"other"] + small_set
 )
 store(v2_sha256l32_inverted, Path("test_v2_sha256l32_inverted_mlbf"))
+
+print("--- v2_sha256ctr_with_salt ---")
+v2_sha256ctr_with_salt = filtercascade.FilterCascade(
+    [],
+    defaultHashAlg=filtercascade.fileformats.HashAlgorithm.SHA256CTR,
+    salt=b"nacl",
+    growth_factor=growth_factor,
+    min_filter_length=min_filter_length,
+)
+v2_sha256ctr_with_salt.initialize(
+    include=[b"this", b"that"] + small_set, exclude=large_set | set([b"other"])
+)
+store(v2_sha256ctr_with_salt, Path("test_v2_sha256ctr_salt_mlbf"))

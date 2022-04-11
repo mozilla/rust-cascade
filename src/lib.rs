@@ -597,6 +597,21 @@ mod tests {
     }
 
     #[test]
+    fn cascade_v2_sha256ctr_from_file_bytes_test() {
+        let v = include_bytes!("../test_data/test_v2_sha256ctr_salt_mlbf").to_vec();
+        let cascade = Cascade::from_bytes(v)
+            .expect("parsing Cascade should succeed")
+            .expect("Cascade should be Some");
+
+        assert!(cascade.salt == b"nacl".to_vec());
+        assert!(cascade.inverted == false);
+        assert!(cascade.has(b"this") == true);
+        assert!(cascade.has(b"that") == true);
+        assert!(cascade.has(b"other") == false);
+        assert_eq!(cascade.approximate_size_of(), 128510);
+    }
+
+    #[test]
     fn cascade_empty() {
         let cascade = Cascade::from_bytes(Vec::new()).expect("parsing Cascade should succeed");
         assert!(cascade.is_none());
