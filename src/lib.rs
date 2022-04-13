@@ -365,7 +365,16 @@ impl Cascade {
             ));
         }
 
-        Cascade::child_layer_from_bytes(reader, &salt, inverted)
+        let top_layer = Cascade::child_layer_from_bytes(reader, &salt, inverted)?;
+        if let Some(ref c) = top_layer {
+            if c.filter.level != 1 {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    format!("Top layer index {} != 1", c.filter.level),
+                ));
+            }
+        }
+        Ok(top_layer)
     }
 
     fn child_layer_from_bytes<R: Read>(
@@ -377,9 +386,21 @@ impl Cascade {
             Some(filter) => filter,
             None => return Ok(None),
         };
+        let child_layer = Cascade::child_layer_from_bytes(reader, salt, inverted)?;
+        if let Some(ref c) = child_layer {
+            if c.filter.level != filter.level + 1 {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    format!(
+                        "Irregular layer numbering: {} followed by {}",
+                        filter.level, c.filter.level
+                    ),
+                ));
+            }
+        }
         Ok(Some(Box::new(Cascade {
             filter,
-            child_layer: Cascade::child_layer_from_bytes(reader, salt, inverted)?,
+            child_layer,
             salt: salt.to_vec(),
             inverted,
         })))
