@@ -664,4 +664,30 @@ mod tests {
         let cascade = Cascade::from_bytes(Vec::new()).expect("parsing Cascade should succeed");
         assert!(cascade.is_none());
     }
+
+    #[test]
+    fn cascade_test_from_bytes() {
+        let unknown_version: Vec<u8> = vec![0xff, 0xff, 0x00, 0x00];
+        match Cascade::from_bytes(unknown_version) {
+            Ok(_) => panic!("Cascade::from_bytes allows unknown version."),
+            Err(_) => (),
+        }
+
+        let first_layer_is_zero: Vec<u8> = vec![
+            0x01, 0x00, 0x01, 0x08, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        match Cascade::from_bytes(first_layer_is_zero) {
+            Ok(_) => panic!("Cascade::from_bytes allows zero indexed layers."),
+            Err(_) => (),
+        }
+
+        let second_layer_is_three: Vec<u8> = vec![
+            0x01, 0x00, 0x01, 0x08, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01,
+            0x08, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x03, 0x00,
+        ];
+        match Cascade::from_bytes(second_layer_is_three) {
+            Ok(_) => panic!("Cascade::from_bytes allows non-sequential layers."),
+            Err(_) => (),
+        }
+    }
 }
