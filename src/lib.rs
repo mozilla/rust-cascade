@@ -12,20 +12,16 @@ use std::mem::size_of;
 
 /// A Bloom filter representing a specific level in a multi-level cascading Bloom filter.
 struct Bloom {
-    /// What level this filter is in
-    level: u8,
     /// How many hash functions this filter uses
     n_hash_funcs: u32,
     /// The bit length of the filter
     size: u32,
     /// The data of the filter
     data: Vec<u8>,
-    /// The hash algorithm enumeration in use
-    hash_algorithm: HashAlgorithm,
 }
 
 #[repr(u8)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq)]
 /// These enumerations need to match the python filter-cascade project:
 /// https://github.com/mozilla/filter-cascade/blob/v0.3.0/filtercascade/fileformats.py
 enum HashAlgorithm {
@@ -200,7 +196,7 @@ impl Bloom {
     /// [1 byte] - which level in the cascade this filter is
     /// [variable length bytes] - the filter itself (the length is determined by Ceiling(bit length
     /// / 8)
-    pub fn read<R: Read>(reader: &mut R) -> Result<Option<Bloom>, Error> {
+    pub fn read<R: Read>(reader: &mut R) -> Result<Option<(Bloom, usize, HashAlgorithm)>, Error> {
         // Load the layer metadata. bloomer.py writes size, nHashFuncs and level as little-endian
         // unsigned ints.
         let hash_algorithm_val = match reader.read_u8() {
@@ -227,13 +223,11 @@ impl Bloom {
         let mut bits_bytes = vec![0; byte_count];
         reader.read_exact(&mut bits_bytes)?;
         let bloom = Bloom {
-            level,
             n_hash_funcs,
             size,
             data: bits_bytes,
-            hash_algorithm,
         };
-        Ok(Some(bloom))
+        Ok(Some((bloom, level as usize, hash_algorithm)))
     }
 
     /// Test for the presence of a given sequence of bytes in this Bloom filter.
@@ -251,26 +245,26 @@ impl Bloom {
         }
         true
     }
+
+    pub fn approximate_size_of(&self) -> usize {
+        size_of::<Bloom>() + self.data.len()
+    }
 }
 
 impl fmt::Display for Bloom {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "level={} n_hash_funcs={} hash_algorithm={} size={}",
-            self.level, self.n_hash_funcs, self.hash_algorithm, self.size
-        )
+        write!(f, "n_hash_funcs={} size={}", self.n_hash_funcs, self.size)
     }
 }
 
 /// A multi-level cascading Bloom filter.
 pub struct Cascade {
     /// The Bloom filter for this level in the cascade
-    filter: Bloom,
-    /// The next (lower) level in the cascade
-    child_layer: Option<Box<Cascade>>,
+    filters: Vec<Bloom>,
     /// The salt in use, if any
     salt: Vec<u8>,
+    /// The hash algorithm / index generating function to use
+    hash_algorithm: HashAlgorithm,
     /// Whether the logic should be inverted
     inverted: bool,
 }
@@ -285,13 +279,16 @@ impl Cascade {
     /// https://github.com/mozilla/filter-cascade/blob/v0.3.0/filtercascade/fileformats.py
     ///
     /// May be of length 0, in which case `None` is returned.
-    pub fn from_bytes(bytes: Vec<u8>) -> Result<Option<Box<Cascade>>, Error> {
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Option<Self>, Error> {
         if bytes.is_empty() {
             return Ok(None);
         }
         let mut reader = bytes.as_slice();
         let version = reader.read_u16::<byteorder::LittleEndian>()?;
+
+        let mut filters = vec![];
         let mut salt = vec![];
+        let mut top_hash_alg = None;
         let mut inverted = false;
 
         if version >= 2 {
@@ -311,45 +308,38 @@ impl Cascade {
             ));
         }
 
-        let top_layer = Cascade::child_layer_from_bytes(reader, &salt, inverted)?;
-        if let Some(ref c) = top_layer {
-            if c.filter.level != 1 {
-                return Err(Error::new(
-                    ErrorKind::InvalidData,
-                    format!("Top layer index {} != 1", c.filter.level),
-                ));
-            }
-        }
-        Ok(top_layer)
-    }
+        while let Some((filter, layer_number, layer_hash_alg)) = Bloom::read(&mut reader)? {
+            filters.push(filter);
 
-    fn child_layer_from_bytes<R: Read>(
-        mut reader: R,
-        salt: &[u8],
-        inverted: bool,
-    ) -> Result<Option<Box<Cascade>>, Error> {
-        let filter = match Bloom::read(&mut reader)? {
-            Some(filter) => filter,
-            None => return Ok(None),
-        };
-        let child_layer = Cascade::child_layer_from_bytes(reader, salt, inverted)?;
-        if let Some(ref c) = child_layer {
-            if c.filter.level != filter.level + 1 {
+            if layer_number != filters.len() {
                 return Err(Error::new(
                     ErrorKind::InvalidData,
-                    format!(
-                        "Irregular layer numbering: {} followed by {}",
-                        filter.level, c.filter.level
-                    ),
+                    "Irregular layer numbering",
+                ));
+            }
+            if *top_hash_alg.get_or_insert(layer_hash_alg) != layer_hash_alg {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "Inconsistent hash algorithms",
                 ));
             }
         }
-        Ok(Some(Box::new(Cascade {
-            filter,
-            child_layer,
-            salt: salt.to_vec(),
+
+        if filters.is_empty() {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                format!("Missing filters"),
+            ));
+        }
+
+        let hash_algorithm = top_hash_alg.unwrap();
+
+        Ok(Some(Cascade {
+            filters,
+            salt,
+            hash_algorithm,
             inverted,
-        })))
+        }))
     }
 
     /// Determine if the given sequence of bytes is in the cascade.
@@ -380,19 +370,19 @@ impl Cascade {
     }
 
     fn has_internal<T: CascadeIndexGenerator>(&self, generator: &mut T) -> bool {
-        if self.filter.has(generator) {
-            match self.child_layer {
-                Some(ref child) => {
-                    generator.next_layer(child.filter.size);
-                    let child_value = !child.has_internal(generator);
-                    return child_value;
-                }
-                None => {
-                    return true;
-                }
+        // Query filters 0..self.filters.len() until we get a non-membership result.
+        // If this occurs at an even index filter, the element *is not* included.
+        // ... at an odd-index filter, the element *is* included.
+        let mut rv = false;
+        for filter in &self.filters {
+            if filter.has(generator, &self.salt) {
+                rv = !rv;
+                generator.next_layer();
+            } else {
+                break;
             }
         }
-        false
+        rv
     }
 
     /// Determine the approximate amount of memory in bytes used by this
@@ -403,11 +393,11 @@ impl Cascade {
     /// size.
     pub fn approximate_size_of(&self) -> usize {
         size_of::<Cascade>()
-            + self.filter.data.len()
             + self
-                .child_layer
-                .as_ref()
-                .map_or(0, |child_layer| child_layer.approximate_size_of())
+                .filters
+                .iter()
+                .map(|x| x.approximate_size_of())
+                .sum::<usize>()
             + self.salt.len()
     }
 }
@@ -416,13 +406,13 @@ impl fmt::Display for Cascade {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "salt={:?} inverted={} filter=[{}] ",
-            self.salt, self.inverted, self.filter
+            "salt={:?} inverted={} hash_algorithm={}\n",
+            self.salt, self.inverted, self.hash_algorithm,
         )?;
-        match &self.child_layer {
-            Some(layer) => write!(f, "[child={}]", layer),
-            None => Ok(()),
+        for filter in &self.filters {
+            write!(f, "\t[{}]\n", filter)?;
         }
+        Ok(())
     }
 }
 
@@ -430,6 +420,7 @@ impl fmt::Display for Cascade {
 mod tests {
     use Bloom;
     use Cascade;
+    use HashAlgorithm;
     use MurmurHash3IndexGenerator;
 
     #[test]
@@ -440,21 +431,21 @@ mod tests {
         let mut reader = src.as_slice();
 
         match Bloom::read(&mut reader) {
-            Ok(Some(bloom)) => {
-                assert!(bloom.has(&mut MurmurHash3IndexGenerator::new(
-                    b"this".as_ref(),
-                    bloom.size
-                )));
-                assert!(bloom.has(&mut MurmurHash3IndexGenerator::new(
-                    b"that".as_ref(),
-                    bloom.size
-                )));
-                assert!(!bloom.has(&mut MurmurHash3IndexGenerator::new(
-                    b"other".as_ref(),
-                    bloom.size
-                )));
+            Ok(Some((bloom, 1, HashAlgorithm::MurmurHash3))) => {
+                assert!(bloom.has(
+                    &mut MurmurHash3IndexGenerator::from(b"this".to_vec(),),
+                    &vec![]
+                ));
+                assert!(bloom.has(
+                    &mut MurmurHash3IndexGenerator::from(b"that".to_vec(),),
+                    &vec![]
+                ));
+                assert!(!bloom.has(
+                    &mut MurmurHash3IndexGenerator::from(b"other".to_vec(),),
+                    &vec![]
+                ));
             }
-            Ok(None) => panic!("Parsing failed"),
+            Ok(_) => panic!("Parsing failed"),
             Err(_) => panic!("Parsing failed"),
         };
         assert!(reader.is_empty());
@@ -509,7 +500,7 @@ mod tests {
               0x77, 0x8e ];
         assert!(!cascade.has(&key_for_valid_cert));
 
-        assert_eq!(cascade.approximate_size_of(), 15592);
+        assert_eq!(cascade.approximate_size_of(), 15408);
 
         let v = include_bytes!("../test_data/test_v1_murmur_short_mlbf").to_vec();
         assert!(Cascade::from_bytes(v).is_err());
@@ -527,7 +518,7 @@ mod tests {
         assert!(cascade.has(b"this") == true);
         assert!(cascade.has(b"that") == true);
         assert!(cascade.has(b"other") == false);
-        assert_eq!(cascade.approximate_size_of(), 128138);
+        assert_eq!(cascade.approximate_size_of(), 127138);
     }
 
     #[test]
@@ -542,7 +533,7 @@ mod tests {
         assert!(cascade.has(b"this") == true);
         assert!(cascade.has(b"that") == true);
         assert!(cascade.has(b"other") == false);
-        assert_eq!(cascade.approximate_size_of(), 128145);
+        assert_eq!(cascade.approximate_size_of(), 127061);
     }
 
     #[test]
@@ -557,7 +548,7 @@ mod tests {
         assert!(cascade.has(b"this") == true);
         assert!(cascade.has(b"that") == true);
         assert!(cascade.has(b"other") == false);
-        assert_eq!(cascade.approximate_size_of(), 127746);
+        assert_eq!(cascade.approximate_size_of(), 126794);
     }
 
     #[test]
@@ -572,7 +563,7 @@ mod tests {
         assert!(cascade.has(b"this") == true);
         assert!(cascade.has(b"that") == true);
         assert!(cascade.has(b"other") == false);
-        assert_eq!(cascade.approximate_size_of(), 127937);
+        assert_eq!(cascade.approximate_size_of(), 126937);
     }
 
     #[test]
@@ -587,7 +578,7 @@ mod tests {
         assert!(cascade.has(b"this") == true);
         assert!(cascade.has(b"that") == true);
         assert!(cascade.has(b"other") == false);
-        assert_eq!(cascade.approximate_size_of(), 127989);
+        assert_eq!(cascade.approximate_size_of(), 126989);
     }
 
     #[test]
@@ -602,7 +593,7 @@ mod tests {
         assert!(cascade.has(b"this") == true);
         assert!(cascade.has(b"that") == true);
         assert!(cascade.has(b"other") == false);
-        assert_eq!(cascade.approximate_size_of(), 128342);
+        assert_eq!(cascade.approximate_size_of(), 127310);
     }
 
     #[test]
