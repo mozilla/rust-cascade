@@ -49,137 +49,157 @@ impl TryFrom<u8> for HashAlgorithm {
     }
 }
 
-/// A CascadeIndexGenerator provides read-once access to a table
-/// of numbers H_ij with 0 <= H_ij < r_i.
+/// A CascadeIndexGenerator provides one-time access to a table of pseudorandom functions H_ij
+/// in which each function is of the form
+///     H(s: &[u8], r: u32) -> usize
+/// and for which 0 <= H(s,r) < r for all s, r.
+/// The pseudorandom functions share a common key, represented as a octet string, and the table can
+/// be constructed from this key alone. The functions are pseudorandom with respect to s, but not
+/// r. For a uniformly random key/table, fixed r, and arbitrary strings m0 and m1,
+///      H_ij(m0, r) is computationally indistinguishable from H_ij(m1,r)
+/// for all i,j.
 ///
-/// A call to next_layer(r) increments i and sets r_i = r.
-/// A call to next_index() increments j, resets i, and outputs H_ij.
-///
-trait CascadeIndexGenerator {
-    fn next_layer(&mut self, size: u32);
-    fn next_index(&mut self) -> usize;
+/// A call to next_layer() increments i.
+/// A call to next_index(s, r) increments j, resets i, and outputs
+/// some value H_ij(s) with 0 <= H_ij(s) < r.
+
+#[derive(Debug)]
+enum CascadeIndexGenerator {
+    MurmurHash3 {
+        key: Vec<u8>,
+        counter: u32,
+        depth: u8,
+    },
+    Sha256l32 {
+        key: Vec<u8>,
+        counter: u32,
+        depth: u8,
+    },
+    Sha256Ctr {
+        key: Vec<u8>,
+        counter: u32,
+        state: [u8; 32],
+        state_available: u8,
+    },
 }
 
-struct MurmurHash3IndexGenerator<'a> {
-    key: &'a [u8],
-    counter: u32,
-    depth: u32,
-    range: u32,
-}
-
-impl<'a> MurmurHash3IndexGenerator<'a> {
-    fn new(key: &'a [u8], top_layer_size: u32) -> Self {
-        MurmurHash3IndexGenerator {
-            key,
-            counter: 0,
-            depth: 1,
-            range: top_layer_size,
+impl PartialEq for CascadeIndexGenerator {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                CascadeIndexGenerator::MurmurHash3 { key: ref a, .. },
+                CascadeIndexGenerator::MurmurHash3 { key: ref b, .. },
+            )
+            | (
+                CascadeIndexGenerator::Sha256l32 { key: ref a, .. },
+                CascadeIndexGenerator::Sha256l32 { key: ref b, .. },
+            )
+            | (
+                CascadeIndexGenerator::Sha256Ctr { key: ref a, .. },
+                CascadeIndexGenerator::Sha256Ctr { key: ref b, .. },
+            ) => a == b,
+            _ => false,
         }
     }
 }
 
-impl<'a> CascadeIndexGenerator for MurmurHash3IndexGenerator<'a> {
-    fn next_index(&mut self) -> usize {
-        let hash_seed = (self.counter << 16) + self.depth;
-        self.counter += 1;
-        let index = murmurhash3_x86_32(self.key, hash_seed);
-        (index % self.range) as usize
-    }
-    fn next_layer(&mut self, size: u32) {
-        self.counter = 0;
-        self.depth += 1;
-        self.range = size;
-    }
-}
-
-struct SHA256l32IndexGenerator<'a> {
-    salt: &'a [u8],
-    key: &'a [u8],
-    counter: u32,
-    depth: u8,
-    range: u32,
-}
-
-impl<'a> SHA256l32IndexGenerator<'a> {
-    fn new(salt: &'a [u8], key: &'a [u8], top_layer_size: u32) -> Self {
-        SHA256l32IndexGenerator {
-            salt,
-            key,
-            counter: 0,
-            depth: 1,
-            range: top_layer_size,
+impl CascadeIndexGenerator {
+    fn new(hash_alg: HashAlgorithm, key: Vec<u8>) -> Self {
+        match hash_alg {
+            HashAlgorithm::MurmurHash3 => Self::MurmurHash3 {
+                key,
+                counter: 0,
+                depth: 1,
+            },
+            HashAlgorithm::Sha256l32 => Self::Sha256l32 {
+                key,
+                counter: 0,
+                depth: 1,
+            },
+            HashAlgorithm::Sha256 => Self::Sha256Ctr {
+                key,
+                counter: 0,
+                state: [0; 32],
+                state_available: 0,
+            },
         }
     }
-}
 
-impl<'a> CascadeIndexGenerator for SHA256l32IndexGenerator<'a> {
-    fn next_index(&mut self) -> usize {
-        let mut hasher = Sha256::new();
-        hasher.update(self.salt);
-        hasher.update(self.counter.to_le_bytes());
-        hasher.update(self.depth.to_le_bytes());
-        hasher.update(self.key);
-        self.counter += 1;
-        let index = u32::from_le_bytes(
-            hasher.finalize()[0..4]
-                .try_into()
-                .expect("sha256 should have given enough bytes"),
-        );
-        (index % self.range) as usize
-    }
-    fn next_layer(&mut self, size: u32) {
-        self.counter = 0;
-        self.depth += 1;
-        self.range = size;
-    }
-}
-
-struct SHA256CtrIndexGenerator<'a> {
-    salt: &'a [u8],
-    key: &'a [u8],
-    counter: u32,
-    range: u32,
-    state: [u8; 32],
-    state_available: usize,
-}
-
-impl<'a> SHA256CtrIndexGenerator<'a> {
-    fn new(salt: &'a [u8], key: &'a [u8], top_layer_size: u32) -> Self {
-        SHA256CtrIndexGenerator {
-            salt,
-            key,
-            counter: 0,
-            range: top_layer_size,
-            state: [0; 32],
-            state_available: 0,
-        }
-    }
-}
-
-impl<'a> CascadeIndexGenerator for SHA256CtrIndexGenerator<'a> {
-    fn next_index(&mut self) -> usize {
-        // |bytes_needed| is the minimum number of bytes needed to represent a value in [0, range).
-        let bytes_needed = ((self.range.next_power_of_two().trailing_zeros() + 7) / 8) as usize;
-        let mut index_arr = [0u8; 4];
-        for byte in index_arr.iter_mut().take(bytes_needed) {
-            if self.state_available == 0 {
-                let mut hasher = Sha256::new();
-                hasher.update(self.counter.to_le_bytes());
-                hasher.update(self.salt);
-                hasher.update(self.key);
-                let digest = &hasher.finalize()[..];
-                self.state.copy_from_slice(digest);
-                self.state_available = 32;
-                self.counter += 1;
+    fn next_layer(&mut self) {
+        match self {
+            Self::MurmurHash3 {
+                ref mut counter,
+                ref mut depth,
+                ..
             }
-            *byte = self.state[32 - self.state_available];
-            self.state_available -= 1;
+            | Self::Sha256l32 {
+                ref mut counter,
+                ref mut depth,
+                ..
+            } => {
+                *counter = 0;
+                *depth += 1;
+            }
+            _ => (),
         }
-        let index = LittleEndian::read_u32(&index_arr);
-        (index % self.range) as usize
     }
-    fn next_layer(&mut self, size: u32) {
-        self.range = size;
+
+    fn next_index(&mut self, s: &[u8], range: u32) -> usize {
+        let index = match self {
+            Self::MurmurHash3 {
+                key,
+                ref mut counter,
+                depth,
+            } => {
+                let hash_seed = (*counter << 16) + *depth as u32;
+                *counter += 1;
+                murmurhash3_x86_32(key, hash_seed)
+            }
+
+            Self::Sha256l32 {
+                key,
+                ref mut counter,
+                depth,
+            } => {
+                let mut hasher = Sha256::new();
+                hasher.update(s);
+                hasher.update(counter.to_le_bytes());
+                hasher.update(depth.to_le_bytes());
+                hasher.update(&key);
+                *counter += 1;
+                u32::from_le_bytes(
+                    hasher.finalize()[0..4]
+                        .try_into()
+                        .expect("sha256 should have given enough bytes"),
+                )
+            }
+
+            Self::Sha256Ctr {
+                key,
+                ref mut counter,
+                ref mut state,
+                ref mut state_available,
+            } => {
+                // |bytes_needed| is the minimum number of bytes needed to represent a value in [0, range).
+                let bytes_needed = ((range.next_power_of_two().trailing_zeros() + 7) / 8) as usize;
+                let mut index_arr = [0u8; 4];
+                for byte in index_arr.iter_mut().take(bytes_needed) {
+                    if *state_available == 0 {
+                        let mut hasher = Sha256::new();
+                        hasher.update(counter.to_le_bytes());
+                        hasher.update(s);
+                        hasher.update(&key);
+                        hasher.finalize_into(state.into());
+                        *state_available = state.len() as u8;
+                        *counter += 1;
+                    }
+                    *byte = state[state.len() - *state_available as usize];
+                    *state_available -= 1;
+                }
+                LittleEndian::read_u32(&index_arr)
+            }
+        };
+        (index % range) as usize
     }
 }
 
@@ -230,13 +250,9 @@ impl Bloom {
         Ok(Some((bloom, level as usize, hash_algorithm)))
     }
 
-    /// Test for the presence of a given sequence of bytes in this Bloom filter.
-    ///
-    /// # Arguments
-    /// `item` - The slice of bytes to test for
-    fn has<T: CascadeIndexGenerator>(&self, generator: &mut T) -> bool {
+    fn has(&self, generator: &mut CascadeIndexGenerator, s: &[u8]) -> bool {
         for _ in 0..self.n_hash_funcs {
-            let bit_index = generator.next_index();
+            let bit_index = generator.next_index(s, self.size);
             let byte_index = bit_index / 8;
             let mask = 1 << (bit_index % 8);
             if self.data[byte_index] & mask == 0 {
@@ -347,40 +363,21 @@ impl Cascade {
     /// # Arguments
     /// `entry` - The slice of bytes to test for
     pub fn has(&self, entry: &[u8]) -> bool {
-        let result = match self.filter.hash_algorithm {
-            HashAlgorithm::MurmurHash3 => {
-                assert!(self.salt.is_empty());
-                self.has_internal(&mut MurmurHash3IndexGenerator::new(entry, self.filter.size))
-            }
-            HashAlgorithm::Sha256l32 => self.has_internal(&mut SHA256l32IndexGenerator::new(
-                &self.salt,
-                entry,
-                self.filter.size,
-            )),
-            HashAlgorithm::Sha256 => self.has_internal(&mut SHA256CtrIndexGenerator::new(
-                &self.salt,
-                entry,
-                self.filter.size,
-            )),
-        };
-        if self.inverted {
-            return !result;
-        }
-        result
-    }
-
-    fn has_internal<T: CascadeIndexGenerator>(&self, generator: &mut T) -> bool {
         // Query filters 0..self.filters.len() until we get a non-membership result.
         // If this occurs at an even index filter, the element *is not* included.
         // ... at an odd-index filter, the element *is* included.
+        let mut generator = CascadeIndexGenerator::new(self.hash_algorithm, entry.to_vec());
         let mut rv = false;
         for filter in &self.filters {
-            if filter.has(generator, &self.salt) {
+            if filter.has(&mut generator, &self.salt) {
                 rv = !rv;
                 generator.next_layer();
             } else {
                 break;
             }
+        }
+        if self.inverted {
+            rv = !rv;
         }
         rv
     }
@@ -420,8 +417,8 @@ impl fmt::Display for Cascade {
 mod tests {
     use Bloom;
     use Cascade;
+    use CascadeIndexGenerator;
     use HashAlgorithm;
-    use MurmurHash3IndexGenerator;
 
     #[test]
     fn bloom_v1_test_from_bytes() {
@@ -433,15 +430,15 @@ mod tests {
         match Bloom::read(&mut reader) {
             Ok(Some((bloom, 1, HashAlgorithm::MurmurHash3))) => {
                 assert!(bloom.has(
-                    &mut MurmurHash3IndexGenerator::from(b"this".to_vec(),),
+                    &mut CascadeIndexGenerator::new(HashAlgorithm::MurmurHash3, b"this".to_vec()),
                     &vec![]
                 ));
                 assert!(bloom.has(
-                    &mut MurmurHash3IndexGenerator::from(b"that".to_vec(),),
+                    &mut CascadeIndexGenerator::new(HashAlgorithm::MurmurHash3, b"that".to_vec()),
                     &vec![]
                 ));
                 assert!(!bloom.has(
-                    &mut MurmurHash3IndexGenerator::from(b"other".to_vec(),),
+                    &mut CascadeIndexGenerator::new(HashAlgorithm::MurmurHash3, b"other".to_vec()),
                     &vec![]
                 ));
             }
