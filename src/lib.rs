@@ -10,63 +10,6 @@ use std::fmt;
 use std::io::{Error, ErrorKind, Read};
 use std::mem::size_of;
 
-/// Helper struct to provide read-only bit access to a vector of bytes.
-struct BitVector {
-    /// The bytes we're interested in.
-    bytes: Vec<u8>,
-    /// The number of bits that are valid to access in the vector.
-    /// Not necessarily equal to `bytes.len() * 8`, but it will not be greater than that.
-    bit_len: usize,
-}
-
-impl BitVector {
-    /// Creates a new `BitVector` of the given bit length over the given data.
-    /// Panics if the indicated bit length is larger than fits in the vector.
-    ///
-    /// # Arguments
-    /// * `bytes` - The bytes we need bit-access to
-    /// * `bit_len` - The number of bits that are valid to access in the vector
-    fn new(bytes: Vec<u8>, bit_len: usize) -> BitVector {
-        if bit_len > bytes.len() * 8 {
-            panic!(
-                "bit_len too large for given data: {} > {} * 8",
-                bit_len,
-                bytes.len()
-            );
-        }
-        BitVector { bytes, bit_len }
-    }
-
-    /// Get the value of the specified bit.
-    /// Panics if the specified bit is out of range for the number of bits in this instance.
-    ///
-    /// # Arguments
-    /// * `bit_index` - The bit index to access
-    fn get(&self, bit_index: usize) -> bool {
-        if bit_index >= self.bit_len {
-            panic!(
-                "bit index out of range for bit vector: {} >= {}",
-                bit_index, self.bit_len
-            );
-        }
-        let byte_index = bit_index / 8;
-        let final_bit_index = bit_index % 8;
-        let byte = self.bytes[byte_index];
-        let test_value = match final_bit_index {
-            0 => byte & 0b0000_0001u8,
-            1 => byte & 0b0000_0010u8,
-            2 => byte & 0b0000_0100u8,
-            3 => byte & 0b0000_1000u8,
-            4 => byte & 0b0001_0000u8,
-            5 => byte & 0b0010_0000u8,
-            6 => byte & 0b0100_0000u8,
-            7 => byte & 0b1000_0000u8,
-            _ => panic!("impossible final_bit_index value: {}", final_bit_index),
-        };
-        test_value > 0
-    }
-}
-
 /// A Bloom filter representing a specific level in a multi-level cascading Bloom filter.
 struct Bloom {
     /// What level this filter is in
@@ -76,7 +19,7 @@ struct Bloom {
     /// The bit length of the filter
     size: u32,
     /// The data of the filter
-    bit_vector: BitVector,
+    data: Vec<u8>,
     /// The hash algorithm enumeration in use
     hash_algorithm: HashAlgorithm,
 }
@@ -114,7 +57,7 @@ impl TryFrom<u8> for HashAlgorithm {
 /// of numbers H_ij with 0 <= H_ij < r_i.
 ///
 /// A call to next_layer(r) increments i and sets r_i = r.
-/// A call to next_index() increments j and outputs H_ij.
+/// A call to next_index() increments j, resets i, and outputs H_ij.
 ///
 trait CascadeIndexGenerator {
     fn next_layer(&mut self, size: u32);
@@ -287,7 +230,7 @@ impl Bloom {
             level,
             n_hash_funcs,
             size,
-            bit_vector: BitVector::new(bits_bytes, size as usize),
+            data: bits_bytes,
             hash_algorithm,
         };
         Ok(Some(bloom))
@@ -299,7 +242,10 @@ impl Bloom {
     /// `item` - The slice of bytes to test for
     fn has<T: CascadeIndexGenerator>(&self, generator: &mut T) -> bool {
         for _ in 0..self.n_hash_funcs {
-            if !self.bit_vector.get(generator.next_index()) {
+            let bit_index = generator.next_index();
+            let byte_index = bit_index / 8;
+            let mask = 1 << (bit_index % 8);
+            if self.data[byte_index] & mask == 0 {
                 return false;
             }
         }
@@ -457,7 +403,7 @@ impl Cascade {
     /// size.
     pub fn approximate_size_of(&self) -> usize {
         size_of::<Cascade>()
-            + self.filter.bit_vector.bytes.len()
+            + self.filter.data.len()
             + self
                 .child_layer
                 .as_ref()
@@ -563,7 +509,7 @@ mod tests {
               0x77, 0x8e ];
         assert!(!cascade.has(&key_for_valid_cert));
 
-        assert_eq!(cascade.approximate_size_of(), 15632);
+        assert_eq!(cascade.approximate_size_of(), 15592);
 
         let v = include_bytes!("../test_data/test_v1_murmur_short_mlbf").to_vec();
         assert!(Cascade::from_bytes(v).is_err());
@@ -581,7 +527,7 @@ mod tests {
         assert!(cascade.has(b"this") == true);
         assert!(cascade.has(b"that") == true);
         assert!(cascade.has(b"other") == false);
-        assert_eq!(cascade.approximate_size_of(), 128314);
+        assert_eq!(cascade.approximate_size_of(), 128138);
     }
 
     #[test]
@@ -596,7 +542,7 @@ mod tests {
         assert!(cascade.has(b"this") == true);
         assert!(cascade.has(b"that") == true);
         assert!(cascade.has(b"other") == false);
-        assert_eq!(cascade.approximate_size_of(), 128321);
+        assert_eq!(cascade.approximate_size_of(), 128145);
     }
 
     #[test]
@@ -611,7 +557,7 @@ mod tests {
         assert!(cascade.has(b"this") == true);
         assert!(cascade.has(b"that") == true);
         assert!(cascade.has(b"other") == false);
-        assert_eq!(cascade.approximate_size_of(), 127914);
+        assert_eq!(cascade.approximate_size_of(), 127746);
     }
 
     #[test]
@@ -626,7 +572,7 @@ mod tests {
         assert!(cascade.has(b"this") == true);
         assert!(cascade.has(b"that") == true);
         assert!(cascade.has(b"other") == false);
-        assert_eq!(cascade.approximate_size_of(), 128113);
+        assert_eq!(cascade.approximate_size_of(), 127937);
     }
 
     #[test]
@@ -641,7 +587,7 @@ mod tests {
         assert!(cascade.has(b"this") == true);
         assert!(cascade.has(b"that") == true);
         assert!(cascade.has(b"other") == false);
-        assert_eq!(cascade.approximate_size_of(), 128165);
+        assert_eq!(cascade.approximate_size_of(), 127989);
     }
 
     #[test]
@@ -656,7 +602,7 @@ mod tests {
         assert!(cascade.has(b"this") == true);
         assert!(cascade.has(b"that") == true);
         assert!(cascade.has(b"other") == false);
-        assert_eq!(cascade.approximate_size_of(), 128510);
+        assert_eq!(cascade.approximate_size_of(), 128342);
     }
 
     #[test]
