@@ -3,12 +3,29 @@ extern crate murmurhash3;
 extern crate sha2;
 
 use byteorder::{ByteOrder, LittleEndian, ReadBytesExt};
+use fmt::Display;
 use murmurhash3::murmurhash3_x86_32;
 use sha2::{Digest, Sha256};
+use std::cmp::max;
 use std::convert::{TryFrom, TryInto};
 use std::fmt;
 use std::io::{Error, ErrorKind, Read};
 use std::mem::size_of;
+
+const CASCADE_MIN_LAYER_BITS: u32 = 256;
+
+#[derive(Debug)]
+pub struct CascadeError {
+    message: String,
+}
+
+impl<T: Display> From<T> for CascadeError {
+    fn from(err: T) -> CascadeError {
+        CascadeError {
+            message: format!("{}", err),
+        }
+    }
+}
 
 /// A Bloom filter representing a specific level in a multi-level cascading Bloom filter.
 struct Bloom {
@@ -24,7 +41,7 @@ struct Bloom {
 #[derive(Copy, Clone, PartialEq)]
 /// These enumerations need to match the python filter-cascade project:
 /// https://github.com/mozilla/filter-cascade/blob/v0.3.0/filtercascade/fileformats.py
-enum HashAlgorithm {
+pub enum HashAlgorithm {
     MurmurHash3 = 1,
     Sha256l32 = 2, // low 32 bits of sha256
     Sha256 = 3,    // all 256 bits of sha256
@@ -262,6 +279,15 @@ impl Bloom {
         true
     }
 
+    fn insert(&mut self, generator: &mut CascadeIndexGenerator, s: &[u8]) {
+        for _ in 0..self.n_hash_funcs {
+            let bit_index = generator.next_index(s, self.size);
+            let byte_index = bit_index / 8;
+            let mask = 1 << (bit_index % 8);
+            self.data[byte_index] |= mask;
+        }
+    }
+
     pub fn approximate_size_of(&self) -> usize {
         size_of::<Bloom>() + self.data.len()
     }
@@ -344,7 +370,7 @@ impl Cascade {
         if filters.is_empty() {
             return Err(Error::new(
                 ErrorKind::InvalidData,
-                format!("Missing filters"),
+                "Missing filters".to_string(),
             ));
         }
 
@@ -401,15 +427,178 @@ impl Cascade {
 
 impl fmt::Display for Cascade {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
+        writeln!(
             f,
-            "salt={:?} inverted={} hash_algorithm={}\n",
+            "salt={:?} inverted={} hash_algorithm={}",
             self.salt, self.inverted, self.hash_algorithm,
         )?;
         for filter in &self.filters {
-            write!(f, "\t[{}]\n", filter)?;
+            writeln!(f, "\t[{}]", filter)?;
         }
         Ok(())
+    }
+}
+
+enum BuildStatus {
+    Waiting(usize, usize),
+    Finalized,
+}
+
+pub struct CascadeBuilder {
+    filters: Option<Vec<Bloom>>,
+    salt: Option<Vec<u8>>,
+    hash_algorithm: HashAlgorithm,
+    to_include: Vec<CascadeIndexGenerator>,
+    to_exclude: Vec<CascadeIndexGenerator>,
+    status: BuildStatus,
+}
+
+fn new_crlite_bloom(include_capacity: usize, exclude_capacity: usize, top_layer: bool) -> Bloom {
+    assert!(include_capacity != 0 && exclude_capacity != 0);
+
+    let r = include_capacity as f64;
+    let s = exclude_capacity as f64;
+    // Section III.C of CRLite paper
+    //
+    // The desired false positive rate for the top layer is
+    //   p = r/(sqrt(2)*s).
+    // At subsequent layers it is p = 1/2.
+    let log2_fp_rate = match top_layer {
+        true => (r / s).log2() - 0.5f64,
+        false => -1f64,
+    };
+
+    // k = log2(1/p)
+    let n_hash_funcs = (-log2_fp_rate).round() as u32;
+
+    // m = r log2(1/p) / ln(2)
+    let size = max(
+        CASCADE_MIN_LAYER_BITS,
+        (r * (-log2_fp_rate) / (f64::ln(2f64))).round() as u32,
+    );
+
+    Bloom {
+        n_hash_funcs,
+        size,
+        data: vec![0u8; ((size + 7) / 8) as usize],
+    }
+}
+
+impl CascadeBuilder {
+    pub fn new(
+        hash_algorithm: HashAlgorithm,
+        salt: Vec<u8>,
+        include_capacity: usize,
+        exclude_capacity: usize,
+    ) -> Self {
+        CascadeBuilder {
+            filters: Some(vec![new_crlite_bloom(
+                include_capacity,
+                exclude_capacity,
+                true,
+            )]),
+            salt: Some(salt),
+            to_include: vec![],
+            to_exclude: vec![],
+            hash_algorithm,
+            status: BuildStatus::Waiting(include_capacity, exclude_capacity),
+        }
+    }
+
+    pub fn include(&mut self, item: Vec<u8>) {
+        match self.status {
+            BuildStatus::Waiting(ref mut cap, _) if *cap > 0 => *cap -= 1,
+            _ => panic!("capacity violation"),
+        }
+        let mut generator = CascadeIndexGenerator::new(self.hash_algorithm, item);
+        self.filters.as_mut().unwrap()[0].insert(&mut generator, self.salt.as_ref().unwrap());
+        self.to_include.push(generator);
+    }
+
+    pub fn exclude(&mut self, item: Vec<u8>) {
+        match self.status {
+            BuildStatus::Waiting(0, ref mut cap) if *cap > 0 => *cap -= 1,
+            _ => panic!("capacity violation"),
+        }
+        let mut generator = CascadeIndexGenerator::new(self.hash_algorithm, item);
+        if self.filters.as_ref().unwrap()[0].has(&mut generator, self.salt.as_ref().unwrap()) {
+            self.to_exclude.push(generator)
+        }
+    }
+
+    fn push_layer(&mut self) -> Result<(), CascadeError> {
+        // At even layers we encode elements of to_include. At odd layers we encode elements of
+        // to_exclude. In both cases, we track false positives by filtering the complement of the
+        // encoded set through the newly produced bloom filter.
+        let at_even_layer = self.filters.as_ref().unwrap().len() % 2 == 0;
+        let (to_encode, to_filter) = match at_even_layer {
+            true => (&mut self.to_include, &mut self.to_exclude),
+            false => (&mut self.to_exclude, &mut self.to_include),
+        };
+
+        let mut bloom = new_crlite_bloom(to_encode.len(), to_filter.len(), false);
+
+        // temporarily take self.salt since we need an immutable reference for bloom.insert
+        let salt = self.salt.take().unwrap();
+
+        to_encode.iter_mut().for_each(|x| {
+            x.next_layer();
+            bloom.insert(x, &salt)
+        });
+
+        let mut delta = to_filter.len();
+        to_filter.retain_mut(|x| {
+            x.next_layer();
+            bloom.has(x, &salt)
+        });
+        delta -= to_filter.len();
+
+        if delta == 0 {
+            // Check for collisions between the |to_encode| and |to_filter| sets.
+            // The implementation of PartialEq for CascadeIndexGenerator will successfully
+            // identify cases where the user called |include(item)| and |exclude(item)| for the
+            // same item. It will not identify collisions in the underlying hash function.
+            for x in to_encode.iter_mut() {
+                for y in to_filter.iter_mut() {
+                    if x == y {
+                        return Err(CascadeError::from(format!(
+                            "Collision!\n\t{:?}\n\t{:?}",
+                            x, y
+                        )));
+                    }
+                }
+            }
+        }
+
+        self.salt = Some(salt);
+        self.filters.as_mut().unwrap().push(bloom);
+        Ok(())
+    }
+
+    pub fn finalize(&mut self) -> Result<Box<Cascade>, CascadeError> {
+        match self.status {
+            BuildStatus::Waiting(0, 0) => self.status = BuildStatus::Finalized,
+            _ => panic!("capacity violation"),
+        }
+
+        loop {
+            if self.to_exclude.is_empty() {
+                break;
+            }
+            self.push_layer()?;
+
+            if self.to_include.is_empty() {
+                break;
+            }
+            self.push_layer()?;
+        }
+
+        Ok(Box::new(Cascade {
+            filters: self.filters.take().unwrap(),
+            salt: self.salt.take().unwrap(),
+            hash_algorithm: self.hash_algorithm,
+            inverted: false,
+        }))
     }
 }
 
@@ -417,6 +606,7 @@ impl fmt::Display for Cascade {
 mod tests {
     use Bloom;
     use Cascade;
+    use CascadeBuilder;
     use CascadeIndexGenerator;
     use HashAlgorithm;
 
@@ -623,5 +813,90 @@ mod tests {
             Ok(_) => panic!("Cascade::from_bytes allows non-sequential layers."),
             Err(_) => (),
         }
+    }
+
+    #[test]
+    fn cascade_builder_test_collision() {
+        let mut builder =
+            CascadeBuilder::new(HashAlgorithm::Sha256, b"naclnaclnacl".to_vec(), 1, 1);
+        builder.include(b"collision!".to_vec());
+        builder.exclude(b"collision!".to_vec());
+        assert!(builder.finalize().is_err());
+    }
+
+    #[test]
+    #[should_panic(expected="capacity violation")]
+    fn cascade_builder_test_exclude_too_few() {
+        let mut builder =
+            CascadeBuilder::new(HashAlgorithm::Sha256, b"naclnaclnacl".to_vec(), 1, 1);
+        builder.include(b"1".to_vec());
+        assert!(builder.finalize().is_err());
+    }
+
+    #[test]
+    #[should_panic(expected="capacity violation")]
+    fn cascade_builder_test_include_too_few() {
+        let mut builder =
+            CascadeBuilder::new(HashAlgorithm::Sha256, b"naclnaclnacl".to_vec(), 1, 1);
+        builder.exclude(b"1".to_vec());
+    }
+
+    #[test]
+    #[should_panic(expected="capacity violation")]
+    fn cascade_builder_test_include_too_many() {
+        let mut builder =
+            CascadeBuilder::new(HashAlgorithm::Sha256, b"naclnaclnacl".to_vec(), 1, 1);
+        builder.include(b"1".to_vec());
+        builder.include(b"2".to_vec());
+    }
+
+    #[test]
+    #[should_panic(expected="capacity violation")]
+    fn cascade_builder_test_exclude_too_many() {
+        let mut builder =
+            CascadeBuilder::new(HashAlgorithm::Sha256, b"naclnaclnacl".to_vec(), 1, 1);
+        builder.include(b"1".to_vec());
+        builder.exclude(b"2".to_vec());
+        builder.exclude(b"3".to_vec());
+    }
+
+    fn cascade_builder_test_generate(hash_alg: HashAlgorithm) {
+        let total = 10_000_usize;
+        let included = 100_usize;
+        let mut builder = CascadeBuilder::new(
+            hash_alg,
+            b"naclnaclnacl".to_vec(),
+            included,
+            (total - included) as usize,
+        );
+        for i in 0..included {
+            builder.include(i.to_le_bytes().to_vec());
+        }
+        for i in included..total {
+            builder.exclude(i.to_le_bytes().to_vec());
+        }
+        let cascade = builder.finalize().unwrap();
+
+        for i in 0..included {
+            assert!(cascade.has(&i.to_le_bytes()[..]) == true)
+        }
+        for i in included..total {
+            assert!(cascade.has(&i.to_le_bytes()[..]) == false)
+        }
+    }
+
+    #[test]
+    fn cascade_builder_test_generate_murmurhash3() {
+        cascade_builder_test_generate(HashAlgorithm::MurmurHash3);
+    }
+
+    #[test]
+    fn cascade_builder_test_generate_sha256l32() {
+        cascade_builder_test_generate(HashAlgorithm::Sha256l32);
+    }
+
+    #[test]
+    fn cascade_builder_test_generate_sha256() {
+        cascade_builder_test_generate(HashAlgorithm::Sha256);
     }
 }
