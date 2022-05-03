@@ -705,7 +705,7 @@ mod tests {
         assert!(cascade.has(b"this") == true);
         assert!(cascade.has(b"that") == true);
         assert!(cascade.has(b"other") == false);
-        assert_eq!(cascade.approximate_size_of(), 127138);
+        assert_eq!(cascade.approximate_size_of(), 1001);
     }
 
     #[test]
@@ -720,7 +720,7 @@ mod tests {
         assert!(cascade.has(b"this") == true);
         assert!(cascade.has(b"that") == true);
         assert!(cascade.has(b"other") == false);
-        assert_eq!(cascade.approximate_size_of(), 127061);
+        assert_eq!(cascade.approximate_size_of(), 1001);
     }
 
     #[test]
@@ -735,7 +735,7 @@ mod tests {
         assert!(cascade.has(b"this") == true);
         assert!(cascade.has(b"that") == true);
         assert!(cascade.has(b"other") == false);
-        assert_eq!(cascade.approximate_size_of(), 126794);
+        assert_eq!(cascade.approximate_size_of(), 992);
     }
 
     #[test]
@@ -750,7 +750,7 @@ mod tests {
         assert!(cascade.has(b"this") == true);
         assert!(cascade.has(b"that") == true);
         assert!(cascade.has(b"other") == false);
-        assert_eq!(cascade.approximate_size_of(), 126937);
+        assert_eq!(cascade.approximate_size_of(), 1058);
     }
 
     #[test]
@@ -765,7 +765,7 @@ mod tests {
         assert!(cascade.has(b"this") == true);
         assert!(cascade.has(b"that") == true);
         assert!(cascade.has(b"other") == false);
-        assert_eq!(cascade.approximate_size_of(), 126989);
+        assert_eq!(cascade.approximate_size_of(), 1061);
     }
 
     #[test]
@@ -780,7 +780,7 @@ mod tests {
         assert!(cascade.has(b"this") == true);
         assert!(cascade.has(b"that") == true);
         assert!(cascade.has(b"other") == false);
-        assert_eq!(cascade.approximate_size_of(), 127310);
+        assert_eq!(cascade.approximate_size_of(), 1070);
     }
 
     #[test]

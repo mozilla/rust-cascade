@@ -24,8 +24,8 @@ def store(fc, path):
         fc.tofile(f)
 
 
-small_set = list(set(predictable_serial_gen(0, 100_000)))
-large_set = set(predictable_serial_gen(100_000, 1_000_000))
+small_set = list(set(predictable_serial_gen(0, 500)))
+large_set = set(predictable_serial_gen(500, 10_000))
 
 # filter parameters
 growth_factor = 1.0
