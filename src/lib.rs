@@ -334,7 +334,14 @@ impl Cascade {
         let mut top_hash_alg = None;
         let mut inverted = false;
 
-        if version >= 2 {
+        if version > 2 {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                format!("Invalid version: {}", version),
+            ));
+        }
+
+        if version == 2 {
             inverted = reader.read_u8()? != 0;
             let salt_len = reader.read_u8()? as usize;
             if salt_len > 0 {
@@ -342,13 +349,6 @@ impl Cascade {
                 reader.read_exact(&mut salt_bytes)?;
                 salt.extend_from_slice(&salt_bytes);
             }
-        }
-
-        if version > 2 {
-            return Err(Error::new(
-                ErrorKind::InvalidData,
-                format!("Invalid version: {}", version),
-            ));
         }
 
         while let Some((filter, layer_number, layer_hash_alg)) = Bloom::read(&mut reader)? {
@@ -383,6 +383,36 @@ impl Cascade {
             hash_algorithm,
             inverted,
         }))
+    }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>, CascadeError> {
+        if self.salt.len() >= 256 {
+            return Err(CascadeError::from(
+                "Cannot serialize a filter with a salt of length >= 256.",
+            ));
+        }
+        if self.filters.len() >= 255 {
+            return Err(CascadeError::from(
+                "Cannot serialize a filter with >= 255 layers.",
+            ));
+        }
+        let mut out = vec![];
+        let version: u16 = 2;
+        let inverted: u8 = self.inverted.into();
+        let salt_len: u8 = self.salt.len() as u8;
+        let hash_alg: u8 = self.hash_algorithm as u8;
+        out.extend_from_slice(&version.to_le_bytes());
+        out.push(inverted);
+        out.push(salt_len);
+        out.extend_from_slice(&self.salt);
+        for (layer, bloom) in self.filters.iter().enumerate() {
+            out.push(hash_alg);
+            out.extend_from_slice(&bloom.size.to_le_bytes());
+            out.extend_from_slice(&bloom.n_hash_funcs.to_le_bytes());
+            out.push((1 + layer) as u8); // 1-indexed
+            out.extend_from_slice(&bloom.data);
+        }
+        Ok(out)
     }
 
     /// Determine if the given sequence of bytes is in the cascade.
@@ -878,6 +908,15 @@ mod tests {
         }
         let cascade = builder.finalize().unwrap();
 
+        // Ensure we can serialize / deserialize
+        let cascade_bytes = cascade.to_bytes()
+            .expect("failed to serialize cascade");
+
+        let cascade = Cascade::from_bytes(cascade_bytes)
+            .expect("failed to deserialize cascade")
+            .expect("cascade should not be None here");
+
+        // Ensure each query gives the correct result
         for i in 0..included {
             assert!(cascade.has(&i.to_le_bytes()[..]) == true)
         }
