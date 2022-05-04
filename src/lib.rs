@@ -27,7 +27,8 @@ impl<T: Display> From<T> for CascadeError {
     }
 }
 
-/// A Bloom filter representing a specific level in a multi-level cascading Bloom filter.
+/// A Bloom filter representing a specific layer in a multi-layer cascading Bloom filter.
+/// The same hash function is used for all layers, so it is not encoded here.
 struct Bloom {
     /// How many hash functions this filter uses
     n_hash_funcs: u32,
@@ -230,11 +231,11 @@ impl Bloom {
     /// [1 byte] - the hash algorithm to use in the filter
     /// [4 little endian bytes] - the length in bits of the filter
     /// [4 little endian bytes] - the number of hash functions to use in the filter
-    /// [1 byte] - which level in the cascade this filter is
+    /// [1 byte] - which layer in the cascade this filter is
     /// [variable length bytes] - the filter itself (the length is determined by Ceiling(bit length
     /// / 8)
     pub fn read<R: Read>(reader: &mut R) -> Result<Option<(Bloom, usize, HashAlgorithm)>, Error> {
-        // Load the layer metadata. bloomer.py writes size, nHashFuncs and level as little-endian
+        // Load the layer metadata. bloomer.py writes size, nHashFuncs and layer as little-endian
         // unsigned ints.
         let hash_algorithm_val = match reader.read_u8() {
             Ok(val) => val,
@@ -254,7 +255,7 @@ impl Bloom {
 
         let size = reader.read_u32::<byteorder::LittleEndian>()?;
         let n_hash_funcs = reader.read_u32::<byteorder::LittleEndian>()?;
-        let level = reader.read_u8()?;
+        let layer = reader.read_u8()?;
 
         let byte_count = ((size + 7) / 8) as usize;
         let mut bits_bytes = vec![0; byte_count];
@@ -264,7 +265,7 @@ impl Bloom {
             size,
             data: bits_bytes,
         };
-        Ok(Some((bloom, level as usize, hash_algorithm)))
+        Ok(Some((bloom, layer as usize, hash_algorithm)))
     }
 
     fn has(&self, generator: &mut CascadeIndexGenerator, s: &[u8]) -> bool {
@@ -299,9 +300,9 @@ impl fmt::Display for Bloom {
     }
 }
 
-/// A multi-level cascading Bloom filter.
+/// A multi-layer cascading Bloom filter.
 pub struct Cascade {
-    /// The Bloom filter for this level in the cascade
+    /// The Bloom filter for this layer in the cascade
     filters: Vec<Bloom>,
     /// The salt in use, if any
     salt: Vec<u8>,
@@ -312,7 +313,7 @@ pub struct Cascade {
 }
 
 impl Cascade {
-    /// Attempts to decode and return a multi-level cascading Bloom filter.
+    /// Attempts to decode and return a multi-layer cascading Bloom filter.
     ///
     /// # Arguments
     /// `bytes` - The encoded representation of the Bloom filters in this cascade. Starts with 2
