@@ -3,26 +3,43 @@ extern crate murmurhash3;
 extern crate sha2;
 
 use byteorder::{ByteOrder, LittleEndian, ReadBytesExt};
-use fmt::Display;
 use murmurhash3::murmurhash3_x86_32;
 use sha2::{Digest, Sha256};
 use std::cmp::max;
 use std::convert::{TryFrom, TryInto};
 use std::fmt;
-use std::io::{Error, ErrorKind, Read};
+use std::io::{ErrorKind, Read};
 use std::mem::size_of;
 
 const CASCADE_MIN_LAYER_BITS: u32 = 256;
 
 #[derive(Debug)]
-pub struct CascadeError {
-    message: String,
+pub enum CascadeError {
+    LongSalt,
+    TooManyLayers,
+    Collision,
+    UnknownHashFunction,
+    Parse(&'static str),
 }
 
-impl<T: Display> From<T> for CascadeError {
-    fn from(err: T) -> CascadeError {
-        CascadeError {
-            message: format!("{}", err),
+impl fmt::Display for CascadeError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            CascadeError::LongSalt => {
+                write!(f, "Cannot serialize a filter with a salt of length >= 256.")
+            }
+            CascadeError::TooManyLayers => {
+                write!(f, "Cannot serialize a filter with >= 255 layers.")
+            }
+            CascadeError::Collision => {
+                write!(f, "Collision between included and excluded sets.")
+            }
+            CascadeError::UnknownHashFunction => {
+                write!(f, "Unknown hash function.")
+            }
+            CascadeError::Parse(reason) => {
+                write!(f, "Cannot parse cascade: {}", reason)
+            }
         }
     }
 }
@@ -55,14 +72,14 @@ impl fmt::Display for HashAlgorithm {
 }
 
 impl TryFrom<u8> for HashAlgorithm {
-    type Error = ();
-    fn try_from(value: u8) -> Result<HashAlgorithm, ()> {
+    type Error = CascadeError;
+    fn try_from(value: u8) -> Result<HashAlgorithm, CascadeError> {
         match value {
             // Naturally, these need to match the enum declaration
             1 => Ok(Self::MurmurHash3),
             2 => Ok(Self::Sha256l32),
             3 => Ok(Self::Sha256),
-            _ => Err(()),
+            _ => Err(CascadeError::UnknownHashFunction),
         }
     }
 }
@@ -234,36 +251,36 @@ impl Bloom {
     /// [1 byte] - which layer in the cascade this filter is
     /// [variable length bytes] - the filter itself (the length is determined by Ceiling(bit length
     /// / 8)
-    pub fn read<R: Read>(reader: &mut R) -> Result<Option<(Bloom, usize, HashAlgorithm)>, Error> {
-        // Load the layer metadata. bloomer.py writes size, nHashFuncs and layer as little-endian
-        // unsigned ints.
+    pub fn read<R: Read>(
+        reader: &mut R,
+    ) -> Result<Option<(Bloom, usize, HashAlgorithm)>, CascadeError> {
         let hash_algorithm_val = match reader.read_u8() {
             Ok(val) => val,
             // If reader is at EOF, there is no bloom filter.
             Err(e) if e.kind() == ErrorKind::UnexpectedEof => return Ok(None),
-            Err(e) => return Err(e),
+            Err(_) => return Err(CascadeError::Parse("read error")),
         };
-        let hash_algorithm = match HashAlgorithm::try_from(hash_algorithm_val) {
-            Ok(algo) => algo,
-            Err(()) => {
-                return Err(Error::new(
-                    ErrorKind::InvalidData,
-                    "Unexpected hash algorithm",
-                ))
-            }
-        };
+        let hash_algorithm = HashAlgorithm::try_from(hash_algorithm_val)?;
 
-        let size = reader.read_u32::<byteorder::LittleEndian>()?;
-        let n_hash_funcs = reader.read_u32::<byteorder::LittleEndian>()?;
-        let layer = reader.read_u8()?;
+        let size = reader
+            .read_u32::<byteorder::LittleEndian>()
+            .or(Err(CascadeError::Parse("truncated at layer size")))?;
+        let n_hash_funcs = reader
+            .read_u32::<byteorder::LittleEndian>()
+            .or(Err(CascadeError::Parse("truncated at layer hash count")))?;
+        let layer = reader
+            .read_u8()
+            .or(Err(CascadeError::Parse("truncated at layer number")))?;
 
         let byte_count = ((size + 7) / 8) as usize;
-        let mut bits_bytes = vec![0; byte_count];
-        reader.read_exact(&mut bits_bytes)?;
+        let mut data = vec![0; byte_count];
+        reader
+            .read_exact(&mut data)
+            .or(Err(CascadeError::Parse("truncated at layer data")))?;
         let bloom = Bloom {
             n_hash_funcs,
             size,
-            data: bits_bytes,
+            data,
         };
         Ok(Some((bloom, layer as usize, hash_algorithm)))
     }
@@ -322,12 +339,14 @@ impl Cascade {
     /// https://github.com/mozilla/filter-cascade/blob/v0.3.0/filtercascade/fileformats.py
     ///
     /// May be of length 0, in which case `None` is returned.
-    pub fn from_bytes(bytes: Vec<u8>) -> Result<Option<Self>, Error> {
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Option<Self>, CascadeError> {
         if bytes.is_empty() {
             return Ok(None);
         }
         let mut reader = bytes.as_slice();
-        let version = reader.read_u16::<byteorder::LittleEndian>()?;
+        let version = reader
+            .read_u16::<byteorder::LittleEndian>()
+            .or(Err(CascadeError::Parse("truncated at version")))?;
 
         let mut filters = vec![];
         let mut salt = vec![];
@@ -335,19 +354,30 @@ impl Cascade {
         let mut inverted = false;
 
         if version > 2 {
-            return Err(Error::new(
-                ErrorKind::InvalidData,
-                format!("Invalid version: {}", version),
-            ));
+            return Err(CascadeError::Parse("unknown version"));
         }
 
         if version == 2 {
-            inverted = reader.read_u8()? != 0;
-            let salt_len = reader.read_u8()? as usize;
+            let inverted_val = reader
+                .read_u8()
+                .or(Err(CascadeError::Parse("truncated at inverted")))?;
+            if inverted_val > 1 {
+                return Err(CascadeError::Parse("invalid value for inverted"));
+            }
+            inverted = 0 != inverted_val;
+            let salt_len: usize = reader
+                .read_u8()
+                .or(Err(CascadeError::Parse("truncated at salt length")))?
+                .into();
+            if salt_len >= 256 {
+                return Err(CascadeError::Parse("salt too long"));
+            }
             if salt_len > 0 {
                 let mut salt_bytes = vec![0; salt_len];
-                reader.read_exact(&mut salt_bytes)?;
-                salt.extend_from_slice(&salt_bytes);
+                reader
+                    .read_exact(&mut salt_bytes)
+                    .or(Err(CascadeError::Parse("truncated at salt")))?;
+                salt = salt_bytes;
             }
         }
 
@@ -355,24 +385,20 @@ impl Cascade {
             filters.push(filter);
 
             if layer_number != filters.len() {
-                return Err(Error::new(
-                    ErrorKind::InvalidData,
-                    "Irregular layer numbering",
-                ));
+                return Err(CascadeError::Parse("irregular layer numbering"));
             }
+
             if *top_hash_alg.get_or_insert(layer_hash_alg) != layer_hash_alg {
-                return Err(Error::new(
-                    ErrorKind::InvalidData,
-                    "Inconsistent hash algorithms",
-                ));
+                return Err(CascadeError::Parse("Inconsistent hash algorithms"));
             }
         }
 
         if filters.is_empty() {
-            return Err(Error::new(
-                ErrorKind::InvalidData,
-                "Missing filters".to_string(),
-            ));
+            return Err(CascadeError::Parse("missing filters"));
+        }
+
+        if top_hash_alg.is_none() {
+            return Err(CascadeError::Parse("missing hash algorithm"));
         }
 
         let hash_algorithm = top_hash_alg.unwrap();
@@ -387,14 +413,10 @@ impl Cascade {
 
     pub fn to_bytes(&self) -> Result<Vec<u8>, CascadeError> {
         if self.salt.len() >= 256 {
-            return Err(CascadeError::from(
-                "Cannot serialize a filter with a salt of length >= 256.",
-            ));
+            return Err(CascadeError::LongSalt);
         }
         if self.filters.len() >= 255 {
-            return Err(CascadeError::from(
-                "Cannot serialize a filter with >= 255 layers.",
-            ));
+            return Err(CascadeError::TooManyLayers);
         }
         let mut out = vec![];
         let version: u16 = 2;
@@ -590,13 +612,8 @@ impl CascadeBuilder {
             // identify cases where the user called |include(item)| and |exclude(item)| for the
             // same item. It will not identify collisions in the underlying hash function.
             for x in to_encode.iter_mut() {
-                for y in to_filter.iter_mut() {
-                    if x == y {
-                        return Err(CascadeError::from(format!(
-                            "Collision!\n\t{:?}\n\t{:?}",
-                            x, y
-                        )));
-                    }
+                if to_filter.contains(x) {
+                    return Err(CascadeError::Collision);
                 }
             }
         }
@@ -856,7 +873,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected="capacity violation")]
+    #[should_panic(expected = "capacity violation")]
     fn cascade_builder_test_exclude_too_few() {
         let mut builder =
             CascadeBuilder::new(HashAlgorithm::Sha256, b"naclnaclnacl".to_vec(), 1, 1);
@@ -865,7 +882,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected="capacity violation")]
+    #[should_panic(expected = "capacity violation")]
     fn cascade_builder_test_include_too_few() {
         let mut builder =
             CascadeBuilder::new(HashAlgorithm::Sha256, b"naclnaclnacl".to_vec(), 1, 1);
@@ -873,7 +890,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected="capacity violation")]
+    #[should_panic(expected = "capacity violation")]
     fn cascade_builder_test_include_too_many() {
         let mut builder =
             CascadeBuilder::new(HashAlgorithm::Sha256, b"naclnaclnacl".to_vec(), 1, 1);
@@ -882,7 +899,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected="capacity violation")]
+    #[should_panic(expected = "capacity violation")]
     fn cascade_builder_test_exclude_too_many() {
         let mut builder =
             CascadeBuilder::new(HashAlgorithm::Sha256, b"naclnaclnacl".to_vec(), 1, 1);
@@ -894,6 +911,7 @@ mod tests {
     fn cascade_builder_test_generate(hash_alg: HashAlgorithm) {
         let total = 10_000_usize;
         let included = 100_usize;
+
         let mut builder = CascadeBuilder::new(
             hash_alg,
             b"naclnaclnacl".to_vec(),
@@ -909,8 +927,7 @@ mod tests {
         let cascade = builder.finalize().unwrap();
 
         // Ensure we can serialize / deserialize
-        let cascade_bytes = cascade.to_bytes()
-            .expect("failed to serialize cascade");
+        let cascade_bytes = cascade.to_bytes().expect("failed to serialize cascade");
 
         let cascade = Cascade::from_bytes(cascade_bytes)
             .expect("failed to deserialize cascade")
