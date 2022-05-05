@@ -1,17 +1,25 @@
+//! # rust-cascade
+//!
+//! A library for creating and querying the cascading bloom filters described by
+//! Larisch, Choffnes, Levin, Maggs, Mislove, and Wilson in
+//! "CRLite: A Scalable System for Pushing All TLS Revocations to All Browsers"
+//! <https://www.ieee-security.org/TC/SP2017/papers/567.pdf>
+
 extern crate byteorder;
 extern crate murmurhash3;
+extern crate rand;
 extern crate sha2;
 
 use byteorder::{ByteOrder, LittleEndian, ReadBytesExt};
 use murmurhash3::murmurhash3_x86_32;
+use rand::rngs::OsRng;
+use rand::RngCore;
 use sha2::{Digest, Sha256};
 use std::cmp::max;
 use std::convert::{TryFrom, TryInto};
 use std::fmt;
 use std::io::{ErrorKind, Read};
 use std::mem::size_of;
-
-const CASCADE_MIN_LAYER_BITS: u32 = 256;
 
 #[derive(Debug)]
 pub enum CascadeError {
@@ -58,7 +66,7 @@ struct Bloom {
 #[repr(u8)]
 #[derive(Copy, Clone, PartialEq)]
 /// These enumerations need to match the python filter-cascade project:
-/// https://github.com/mozilla/filter-cascade/blob/v0.3.0/filtercascade/fileformats.py
+/// <https://github.com/mozilla/filter-cascade/blob/v0.3.0/filtercascade/fileformats.py>
 pub enum HashAlgorithm {
     MurmurHash3 = 1,
     Sha256l32 = 2, // low 32 bits of sha256
@@ -239,7 +247,53 @@ impl CascadeIndexGenerator {
 }
 
 impl Bloom {
-    /// Attempts to decode the Bloom filter represented by the bytes in the given reader.
+    /// `new_crlite_bloom` creates an empty bloom filter for a layer of a cascade with the
+    /// parameters specified in [LCL+17, Section III.C].
+    ///
+    /// # Arguments
+    /// * `include_capacity` - the number of elements that will be encoded at the new layer.
+    /// * `exclude_capacity` - the number of elements in the complement of the encoded set.
+    /// * `top_layer`        - whether this is the top layer of the filter.
+    pub fn new_crlite_bloom(
+        include_capacity: usize,
+        exclude_capacity: usize,
+        top_layer: bool,
+    ) -> Self {
+        assert!(include_capacity != 0 && exclude_capacity != 0);
+
+        let r = include_capacity as f64;
+        let s = exclude_capacity as f64;
+
+        // The desired false positive rate for the top layer is
+        //   p = r/(sqrt(2)*s).
+        // With this setting, the number of false positives (which will need to be
+        // encoded at the second layer) is expected to be a factor of sqrt(2)
+        // smaller than the number of elements encoded at the top layer.
+        //
+        // At layer i > 1 we try to ensure that the number of elements to be
+        // encoded at layer i+1 is half the number of elements encoded at
+        // layer i. So we take p = 1/2.
+        let log2_fp_rate = match top_layer {
+            true => (r / s).log2() - 0.5f64,
+            false => -1f64,
+        };
+
+        // the number of hash functions (k) and the size of the bloom filter (m) are given in
+        // [LCL+17] as k = log2(1/p)  and  m = r log2(1/p) / ln(2).
+        //
+        // If this formula gives a value of m < 256, we take m=256 instead. This results in very
+        // slightly sub-optimal size, but gives us the added benefit of doing less hashing.
+        let n_hash_funcs = (-log2_fp_rate).round() as u32;
+        let size = max(256, (r * (-log2_fp_rate) / (f64::ln(2f64))).round() as u32);
+
+        Bloom {
+            n_hash_funcs,
+            size,
+            data: vec![0u8; ((size + 7) / 8) as usize],
+        }
+    }
+
+    /// `read` attempts to decode the Bloom filter represented by the bytes in the given reader.
     ///
     /// # Arguments
     /// * `reader` - The encoded representation of this Bloom filter. May be empty. May include
@@ -249,8 +303,7 @@ impl Bloom {
     /// [4 little endian bytes] - the length in bits of the filter
     /// [4 little endian bytes] - the number of hash functions to use in the filter
     /// [1 byte] - which layer in the cascade this filter is
-    /// [variable length bytes] - the filter itself (the length is determined by Ceiling(bit length
-    /// / 8)
+    /// [variable length bytes] - the filter itself (must be of minimal length)
     pub fn read<R: Read>(
         reader: &mut R,
     ) -> Result<Option<(Bloom, usize, HashAlgorithm)>, CascadeError> {
@@ -330,13 +383,13 @@ pub struct Cascade {
 }
 
 impl Cascade {
-    /// Attempts to decode and return a multi-layer cascading Bloom filter.
+    /// from_bytes attempts to decode and return a multi-layer cascading Bloom filter.
     ///
     /// # Arguments
     /// `bytes` - The encoded representation of the Bloom filters in this cascade. Starts with 2
     /// little endian bytes indicating the version. The current version is 2. The Python
     /// filter-cascade project defines the formats, see
-    /// https://github.com/mozilla/filter-cascade/blob/v0.3.0/filtercascade/fileformats.py
+    /// <https://github.com/mozilla/filter-cascade/blob/v0.3.0/filtercascade/fileformats.py>
     ///
     /// May be of length 0, in which case `None` is returned.
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Option<Self>, CascadeError> {
@@ -411,6 +464,7 @@ impl Cascade {
         }))
     }
 
+    /// to_bytes encodes a cascade in the version 2 format.
     pub fn to_bytes(&self) -> Result<Vec<u8>, CascadeError> {
         if self.salt.len() >= 256 {
             return Err(CascadeError::LongSalt);
@@ -437,7 +491,7 @@ impl Cascade {
         Ok(out)
     }
 
-    /// Determine if the given sequence of bytes is in the cascade.
+    /// has determines if the given sequence of bytes is in the cascade.
     ///
     /// # Arguments
     /// `entry` - The slice of bytes to test for
@@ -492,11 +546,25 @@ impl fmt::Display for Cascade {
     }
 }
 
-enum BuildStatus {
-    Waiting(usize, usize),
-    Finalized,
-}
-
+/// A CascadeBuilder creates a Cascade with layers given by `Bloom::new_crlite_bloom`.
+///
+/// A builder is initialized using [`CascadeBuilder::default`] or [`CascadeBuilder::new`]. Prefer `default`. The `new` constructor
+/// allows the user to specify sensitive internal details such as the hash function and the domain
+/// separation parameter.
+///
+/// Both constructors take `include_capacity` and an `exclude_capacity` parameters. The
+/// `include_capacity` is the number of elements that will be encoded in the Cascade. The
+/// `exclude_capacity` is size of the complement of the encoded set.
+///
+/// The encoded set is specified through calls to [`CascadeBuilder::include`]. Its complement is specified through
+/// calls to [`CascadeBuilder::exclude`]. The cascade is built with a call to [`CascadeBuilder::finalize`].
+///
+/// The builder will track of the number of calls to `include` and `exclude`.
+/// The caller is responsible for making *exactly* `include_capacity` calls to `include`
+/// followed by *exactly* `exclude_capacity` calls to `exclude`.
+/// Calling `exclude` before all `include` calls have been made will result in a panic!().
+/// Calling `finalize` before all `exclude` calls have been made will result in a panic!().
+///
 pub struct CascadeBuilder {
     filters: Option<Vec<Bloom>>,
     salt: Option<Vec<u8>>,
@@ -506,38 +574,18 @@ pub struct CascadeBuilder {
     status: BuildStatus,
 }
 
-fn new_crlite_bloom(include_capacity: usize, exclude_capacity: usize, top_layer: bool) -> Bloom {
-    assert!(include_capacity != 0 && exclude_capacity != 0);
-
-    let r = include_capacity as f64;
-    let s = exclude_capacity as f64;
-    // Section III.C of CRLite paper
-    //
-    // The desired false positive rate for the top layer is
-    //   p = r/(sqrt(2)*s).
-    // At subsequent layers it is p = 1/2.
-    let log2_fp_rate = match top_layer {
-        true => (r / s).log2() - 0.5f64,
-        false => -1f64,
-    };
-
-    // k = log2(1/p)
-    let n_hash_funcs = (-log2_fp_rate).round() as u32;
-
-    // m = r log2(1/p) / ln(2)
-    let size = max(
-        CASCADE_MIN_LAYER_BITS,
-        (r * (-log2_fp_rate) / (f64::ln(2f64))).round() as u32,
-    );
-
-    Bloom {
-        n_hash_funcs,
-        size,
-        data: vec![0u8; ((size + 7) / 8) as usize],
-    }
-}
-
 impl CascadeBuilder {
+    pub fn default(include_capacity: usize, exclude_capacity: usize) -> Self {
+        let mut salt = vec![0u8; 16];
+        OsRng.fill_bytes(&mut salt);
+        CascadeBuilder::new(
+            HashAlgorithm::Sha256,
+            salt,
+            include_capacity,
+            exclude_capacity,
+        )
+    }
+
     pub fn new(
         hash_algorithm: HashAlgorithm,
         salt: Vec<u8>,
@@ -545,7 +593,7 @@ impl CascadeBuilder {
         exclude_capacity: usize,
     ) -> Self {
         CascadeBuilder {
-            filters: Some(vec![new_crlite_bloom(
+            filters: Some(vec![Bloom::new_crlite_bloom(
                 include_capacity,
                 exclude_capacity,
                 true,
@@ -589,7 +637,7 @@ impl CascadeBuilder {
             false => (&mut self.to_exclude, &mut self.to_include),
         };
 
-        let mut bloom = new_crlite_bloom(to_encode.len(), to_filter.len(), false);
+        let mut bloom = Bloom::new_crlite_bloom(to_encode.len(), to_filter.len(), false);
 
         // temporarily take self.salt since we need an immutable reference for bloom.insert
         let salt = self.salt.take().unwrap();
@@ -648,6 +696,16 @@ impl CascadeBuilder {
             inverted: false,
         }))
     }
+}
+
+/// BuildStatus is used to ensure that the `include`, `exclude`, and `finalize` calls to
+/// CascadeBuilder are made in the right order.
+enum BuildStatus {
+    /// The Waiting(a,b) state indicates that the CascadeBuilder is expecting `a` calls to
+    /// `include` and `b` calls to `exclude`.
+    Waiting(usize, usize),
+    /// The Finalized state indicates that the CascadeBuilder has produced a Cascade.
+    Finalized,
 }
 
 #[cfg(test)]
@@ -865,8 +923,7 @@ mod tests {
 
     #[test]
     fn cascade_builder_test_collision() {
-        let mut builder =
-            CascadeBuilder::new(HashAlgorithm::Sha256, b"naclnaclnacl".to_vec(), 1, 1);
+        let mut builder = CascadeBuilder::default(1, 1);
         builder.include(b"collision!".to_vec());
         builder.exclude(b"collision!".to_vec());
         assert!(builder.finalize().is_err());
@@ -875,8 +932,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "capacity violation")]
     fn cascade_builder_test_exclude_too_few() {
-        let mut builder =
-            CascadeBuilder::new(HashAlgorithm::Sha256, b"naclnaclnacl".to_vec(), 1, 1);
+        let mut builder = CascadeBuilder::default(1, 1);
         builder.include(b"1".to_vec());
         assert!(builder.finalize().is_err());
     }
@@ -884,16 +940,14 @@ mod tests {
     #[test]
     #[should_panic(expected = "capacity violation")]
     fn cascade_builder_test_include_too_few() {
-        let mut builder =
-            CascadeBuilder::new(HashAlgorithm::Sha256, b"naclnaclnacl".to_vec(), 1, 1);
+        let mut builder = CascadeBuilder::default(1, 1);
         builder.exclude(b"1".to_vec());
     }
 
     #[test]
     #[should_panic(expected = "capacity violation")]
     fn cascade_builder_test_include_too_many() {
-        let mut builder =
-            CascadeBuilder::new(HashAlgorithm::Sha256, b"naclnaclnacl".to_vec(), 1, 1);
+        let mut builder = CascadeBuilder::default(1, 1);
         builder.include(b"1".to_vec());
         builder.include(b"2".to_vec());
     }
@@ -901,8 +955,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "capacity violation")]
     fn cascade_builder_test_exclude_too_many() {
-        let mut builder =
-            CascadeBuilder::new(HashAlgorithm::Sha256, b"naclnaclnacl".to_vec(), 1, 1);
+        let mut builder = CascadeBuilder::default(1, 1);
         builder.include(b"1".to_vec());
         builder.exclude(b"2".to_vec());
         builder.exclude(b"3".to_vec());
@@ -912,12 +965,9 @@ mod tests {
         let total = 10_000_usize;
         let included = 100_usize;
 
-        let mut builder = CascadeBuilder::new(
-            hash_alg,
-            b"naclnaclnacl".to_vec(),
-            included,
-            (total - included) as usize,
-        );
+        let salt = vec![0u8; 16];
+        let mut builder =
+            CascadeBuilder::new(hash_alg, salt, included, (total - included) as usize);
         for i in 0..included {
             builder.include(i.to_le_bytes().to_vec());
         }
