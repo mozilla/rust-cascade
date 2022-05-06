@@ -623,8 +623,29 @@ impl CascadeBuilder {
         }
         let mut generator = CascadeIndexGenerator::new(self.hash_algorithm, item);
         if self.filters.as_ref().unwrap()[0].has(&mut generator, self.salt.as_ref().unwrap()) {
-            self.to_exclude.push(generator)
+            self.to_exclude.push(generator);
         }
+    }
+
+    /// `exclude_threaded` is like `exclude` but it stores false positives in a caller-owned
+    /// `ExcludeSet`. This allows the caller to exclude items in parallel.
+    pub fn exclude_threaded(&self, exclude_set: &mut ExcludeSet, item: Vec<u8>) {
+        exclude_set.size += 1;
+        let mut generator = CascadeIndexGenerator::new(self.hash_algorithm, item);
+        if self.filters.as_ref().unwrap()[0].has(&mut generator, self.salt.as_ref().unwrap()) {
+            exclude_set.set.push(generator);
+        }
+    }
+
+    /// `collect_exclude_set` merges an `ExcludeSet` into the internal storage of the CascadeBuilder.
+    pub fn collect_exclude_set(&mut self, exclude_set: &mut ExcludeSet) {
+        match self.status {
+            BuildStatus::Waiting(0, ref mut cap) if *cap >= exclude_set.size => {
+                *cap -= exclude_set.size
+            }
+            _ => panic!("capacity violation"),
+        }
+        self.to_exclude.extend(exclude_set.set.drain(..));
     }
 
     fn push_layer(&mut self) -> Result<(), CascadeError> {
@@ -708,12 +729,32 @@ enum BuildStatus {
     Finalized,
 }
 
+/// CascadeBuilder::exclude takes `&mut self` so that it can count exclusions and push items to
+/// self.to_exclude. The bulk of the work it does, however, can be done with an immutable reference
+/// to the top level bloom filter. An `ExcludeSet` is used by `CascadeBuilder::exclude_threaded` to
+/// track the changes to a `CascadeBuilder` that would be made with a call to
+/// `CascadeBuilder::exclude`.
+pub struct ExcludeSet {
+    size: usize,
+    set: Vec<CascadeIndexGenerator>,
+}
+
+impl ExcludeSet {
+    pub fn new() -> Self {
+        ExcludeSet {
+            size: 0,
+            set: vec![],
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use Bloom;
     use Cascade;
     use CascadeBuilder;
     use CascadeIndexGenerator;
+    use ExcludeSet;
     use HashAlgorithm;
 
     #[test]
@@ -959,6 +1000,43 @@ mod tests {
         builder.include(b"1".to_vec());
         builder.exclude(b"2".to_vec());
         builder.exclude(b"3".to_vec());
+    }
+
+    #[test]
+    #[should_panic(expected = "capacity violation")]
+    fn cascade_builder_test_exclude_threaded_no_collect() {
+        let mut builder = CascadeBuilder::default(1, 3);
+        let mut exclude_set = ExcludeSet::new();
+        builder.include(b"1".to_vec());
+        builder.exclude_threaded(&mut exclude_set, b"2".to_vec());
+        builder.exclude_threaded(&mut exclude_set, b"3".to_vec());
+        builder.exclude_threaded(&mut exclude_set, b"4".to_vec());
+        builder.finalize().ok();
+    }
+
+    #[test]
+    #[should_panic(expected = "capacity violation")]
+    fn cascade_builder_test_exclude_threaded_too_many() {
+        let mut builder = CascadeBuilder::default(1, 3);
+        let mut exclude_set = ExcludeSet::new();
+        builder.include(b"1".to_vec());
+        builder.exclude_threaded(&mut exclude_set, b"2".to_vec());
+        builder.exclude_threaded(&mut exclude_set, b"3".to_vec());
+        builder.exclude_threaded(&mut exclude_set, b"4".to_vec());
+        builder.exclude_threaded(&mut exclude_set, b"5".to_vec());
+        builder.collect_exclude_set(&mut exclude_set);
+    }
+
+    #[test]
+    fn cascade_builder_test_exclude_threaded() {
+        let mut builder = CascadeBuilder::default(1, 3);
+        let mut exclude_set = ExcludeSet::new();
+        builder.include(b"1".to_vec());
+        builder.exclude_threaded(&mut exclude_set, b"2".to_vec());
+        builder.exclude_threaded(&mut exclude_set, b"3".to_vec());
+        builder.exclude_threaded(&mut exclude_set, b"4".to_vec());
+        builder.collect_exclude_set(&mut exclude_set);
+        builder.finalize().ok();
     }
 
     fn cascade_builder_test_generate(hash_alg: HashAlgorithm) {
