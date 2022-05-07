@@ -102,9 +102,8 @@ impl TryFrom<u8> for HashAlgorithm {
 ///      H_ij(m0, r) is computationally indistinguishable from H_ij(m1,r)
 /// for all i,j.
 ///
-/// A call to next_layer() increments i.
-/// A call to next_index(s, r) increments j, resets i, and outputs
-/// some value H_ij(s) with 0 <= H_ij(s) < r.
+/// A call to next_layer() increments i and resets j.
+/// A call to next_index(s, r) increments j, and outputs some value H_ij(s) with 0 <= H_ij(s) < r.
 
 #[derive(Debug)]
 enum CascadeIndexGenerator {
@@ -183,11 +182,11 @@ impl CascadeIndexGenerator {
                 *counter = 0;
                 *depth += 1;
             }
-            _ => (),
+            Self::Sha256Ctr { .. } => (),
         }
     }
 
-    fn next_index(&mut self, s: &[u8], range: u32) -> usize {
+    fn next_index(&mut self, salt: &[u8], range: u32) -> usize {
         let index = match self {
             Self::MurmurHash3 {
                 key,
@@ -205,7 +204,7 @@ impl CascadeIndexGenerator {
                 depth,
             } => {
                 let mut hasher = Sha256::new();
-                hasher.update(s);
+                hasher.update(salt);
                 hasher.update(counter.to_le_bytes());
                 hasher.update(depth.to_le_bytes());
                 hasher.update(&key);
@@ -230,7 +229,7 @@ impl CascadeIndexGenerator {
                     if *state_available == 0 {
                         let mut hasher = Sha256::new();
                         hasher.update(counter.to_le_bytes());
-                        hasher.update(s);
+                        hasher.update(salt);
                         hasher.update(&key);
                         hasher.finalize_into(state.into());
                         *state_available = state.len() as u8;
@@ -338,9 +337,10 @@ impl Bloom {
         Ok(Some((bloom, layer as usize, hash_algorithm)))
     }
 
-    fn has(&self, generator: &mut CascadeIndexGenerator, s: &[u8]) -> bool {
+    fn has(&self, generator: &mut CascadeIndexGenerator, salt: &[u8]) -> bool {
         for _ in 0..self.n_hash_funcs {
-            let bit_index = generator.next_index(s, self.size);
+            let bit_index = generator.next_index(salt, self.size);
+            assert!(bit_index < self.size as usize);
             let byte_index = bit_index / 8;
             let mask = 1 << (bit_index % 8);
             if self.data[byte_index] & mask == 0 {
@@ -350,9 +350,9 @@ impl Bloom {
         true
     }
 
-    fn insert(&mut self, generator: &mut CascadeIndexGenerator, s: &[u8]) {
+    fn insert(&mut self, generator: &mut CascadeIndexGenerator, salt: &[u8]) {
         for _ in 0..self.n_hash_funcs {
-            let bit_index = generator.next_index(s, self.size);
+            let bit_index = generator.next_index(salt, self.size);
             let byte_index = bit_index / 8;
             let mask = 1 << (bit_index % 8);
             self.data[byte_index] |= mask;
@@ -450,11 +450,8 @@ impl Cascade {
             return Err(CascadeError::Parse("missing filters"));
         }
 
-        if top_hash_alg.is_none() {
-            return Err(CascadeError::Parse("missing hash algorithm"));
-        }
-
-        let hash_algorithm = top_hash_alg.unwrap();
+        // having a filter implies that top_hash_alg was set.
+        let hash_algorithm = top_hash_alg.unwrap_or_else(|| unreachable!());
 
         Ok(Some(Cascade {
             filters,
@@ -494,12 +491,12 @@ impl Cascade {
     /// has determines if the given sequence of bytes is in the cascade.
     ///
     /// # Arguments
-    /// `entry` - The slice of bytes to test for
-    pub fn has(&self, entry: &[u8]) -> bool {
+    /// `entry` - The bytes to query
+    pub fn has(&self, entry: Vec<u8>) -> bool {
         // Query filters 0..self.filters.len() until we get a non-membership result.
         // If this occurs at an even index filter, the element *is not* included.
         // ... at an odd-index filter, the element *is* included.
-        let mut generator = CascadeIndexGenerator::new(self.hash_algorithm, entry.to_vec());
+        let mut generator = CascadeIndexGenerator::new(self.hash_algorithm, entry);
         let mut rv = false;
         for filter in &self.filters {
             if filter.has(&mut generator, &self.salt) {
@@ -566,8 +563,8 @@ impl fmt::Display for Cascade {
 /// Calling `finalize` before all `exclude` calls have been made will result in a panic!().
 ///
 pub struct CascadeBuilder {
-    filters: Option<Vec<Bloom>>,
-    salt: Option<Vec<u8>>,
+    filters: Vec<Bloom>,
+    salt: Vec<u8>,
     hash_algorithm: HashAlgorithm,
     to_include: Vec<CascadeIndexGenerator>,
     to_exclude: Vec<CascadeIndexGenerator>,
@@ -593,36 +590,36 @@ impl CascadeBuilder {
         exclude_capacity: usize,
     ) -> Self {
         CascadeBuilder {
-            filters: Some(vec![Bloom::new_crlite_bloom(
+            filters: vec![Bloom::new_crlite_bloom(
                 include_capacity,
                 exclude_capacity,
                 true,
-            )]),
-            salt: Some(salt),
+            )],
+            salt,
             to_include: vec![],
             to_exclude: vec![],
             hash_algorithm,
-            status: BuildStatus::Waiting(include_capacity, exclude_capacity),
+            status: BuildStatus(include_capacity, exclude_capacity),
         }
     }
 
     pub fn include(&mut self, item: Vec<u8>) {
         match self.status {
-            BuildStatus::Waiting(ref mut cap, _) if *cap > 0 => *cap -= 1,
+            BuildStatus(ref mut cap, _) if *cap > 0 => *cap -= 1,
             _ => panic!("capacity violation"),
         }
         let mut generator = CascadeIndexGenerator::new(self.hash_algorithm, item);
-        self.filters.as_mut().unwrap()[0].insert(&mut generator, self.salt.as_ref().unwrap());
+        self.filters[0].insert(&mut generator, &self.salt);
         self.to_include.push(generator);
     }
 
     pub fn exclude(&mut self, item: Vec<u8>) {
         match self.status {
-            BuildStatus::Waiting(0, ref mut cap) if *cap > 0 => *cap -= 1,
+            BuildStatus(0, ref mut cap) if *cap > 0 => *cap -= 1,
             _ => panic!("capacity violation"),
         }
         let mut generator = CascadeIndexGenerator::new(self.hash_algorithm, item);
-        if self.filters.as_ref().unwrap()[0].has(&mut generator, self.salt.as_ref().unwrap()) {
+        if self.filters[0].has(&mut generator, &self.salt) {
             self.to_exclude.push(generator);
         }
     }
@@ -632,7 +629,7 @@ impl CascadeBuilder {
     pub fn exclude_threaded(&self, exclude_set: &mut ExcludeSet, item: Vec<u8>) {
         exclude_set.size += 1;
         let mut generator = CascadeIndexGenerator::new(self.hash_algorithm, item);
-        if self.filters.as_ref().unwrap()[0].has(&mut generator, self.salt.as_ref().unwrap()) {
+        if self.filters[0].has(&mut generator, &self.salt) {
             exclude_set.set.push(generator);
         }
     }
@@ -640,19 +637,17 @@ impl CascadeBuilder {
     /// `collect_exclude_set` merges an `ExcludeSet` into the internal storage of the CascadeBuilder.
     pub fn collect_exclude_set(&mut self, exclude_set: &mut ExcludeSet) {
         match self.status {
-            BuildStatus::Waiting(0, ref mut cap) if *cap >= exclude_set.size => {
-                *cap -= exclude_set.size
-            }
+            BuildStatus(0, ref mut cap) if *cap >= exclude_set.size => *cap -= exclude_set.size,
             _ => panic!("capacity violation"),
         }
-        self.to_exclude.extend(exclude_set.set.drain(..));
+        self.to_exclude.append(&mut exclude_set.set);
     }
 
     fn push_layer(&mut self) -> Result<(), CascadeError> {
         // At even layers we encode elements of to_include. At odd layers we encode elements of
         // to_exclude. In both cases, we track false positives by filtering the complement of the
         // encoded set through the newly produced bloom filter.
-        let at_even_layer = self.filters.as_ref().unwrap().len() % 2 == 0;
+        let at_even_layer = self.filters.len() % 2 == 0;
         let (to_encode, to_filter) = match at_even_layer {
             true => (&mut self.to_include, &mut self.to_exclude),
             false => (&mut self.to_exclude, &mut self.to_include),
@@ -661,7 +656,7 @@ impl CascadeBuilder {
         let mut bloom = Bloom::new_crlite_bloom(to_encode.len(), to_filter.len(), false);
 
         // temporarily take self.salt since we need an immutable reference for bloom.insert
-        let salt = self.salt.take().unwrap();
+        let salt = std::mem::take(&mut self.salt);
 
         to_encode.iter_mut().for_each(|x| {
             x.next_layer();
@@ -687,14 +682,14 @@ impl CascadeBuilder {
             }
         }
 
-        self.salt = Some(salt);
-        self.filters.as_mut().unwrap().push(bloom);
+        self.salt = salt;
+        self.filters.push(bloom);
         Ok(())
     }
 
-    pub fn finalize(&mut self) -> Result<Box<Cascade>, CascadeError> {
+    pub fn finalize(mut self) -> Result<Box<Cascade>, CascadeError> {
         match self.status {
-            BuildStatus::Waiting(0, 0) => self.status = BuildStatus::Finalized,
+            BuildStatus(0, 0) => (),
             _ => panic!("capacity violation"),
         }
 
@@ -711,8 +706,8 @@ impl CascadeBuilder {
         }
 
         Ok(Box::new(Cascade {
-            filters: self.filters.take().unwrap(),
-            salt: self.salt.take().unwrap(),
+            filters: self.filters,
+            salt: self.salt,
             hash_algorithm: self.hash_algorithm,
             inverted: false,
         }))
@@ -720,32 +715,19 @@ impl CascadeBuilder {
 }
 
 /// BuildStatus is used to ensure that the `include`, `exclude`, and `finalize` calls to
-/// CascadeBuilder are made in the right order.
-enum BuildStatus {
-    /// The Waiting(a,b) state indicates that the CascadeBuilder is expecting `a` calls to
-    /// `include` and `b` calls to `exclude`.
-    Waiting(usize, usize),
-    /// The Finalized state indicates that the CascadeBuilder has produced a Cascade.
-    Finalized,
-}
+/// CascadeBuilder are made in the right order. The (a,b) state indicates that the
+/// CascadeBuilder is waiting for `a` calls to `include` and `b` calls to `exclude`.
+struct BuildStatus(usize, usize);
 
 /// CascadeBuilder::exclude takes `&mut self` so that it can count exclusions and push items to
 /// self.to_exclude. The bulk of the work it does, however, can be done with an immutable reference
 /// to the top level bloom filter. An `ExcludeSet` is used by `CascadeBuilder::exclude_threaded` to
 /// track the changes to a `CascadeBuilder` that would be made with a call to
 /// `CascadeBuilder::exclude`.
+#[derive(Default)]
 pub struct ExcludeSet {
     size: usize,
     set: Vec<CascadeIndexGenerator>,
-}
-
-impl ExcludeSet {
-    pub fn new() -> Self {
-        ExcludeSet {
-            size: 0,
-            set: vec![],
-        }
-    }
 }
 
 #[cfg(test)]
@@ -810,29 +792,26 @@ mod tests {
             .expect("parsing Cascade should succeed")
             .expect("Cascade should be Some");
         // Key format is SHA256(issuer SPKI) + serial number
-        #[rustfmt::skip]
-        let key_for_revoked_cert_1 =
-            [ 0x2e, 0xb2, 0xd5, 0xa8, 0x60, 0xfe, 0x50, 0xe9, 0xc2, 0x42, 0x36, 0x85, 0x52, 0x98,
-              0x01, 0x50, 0xe4, 0x5d, 0xb5, 0x32, 0x1a, 0x5b, 0x00, 0x5e, 0x26, 0xd6, 0x76, 0x25,
-              0x3a, 0x40, 0x9b, 0xf5,
-              0x06, 0x2d, 0xf5, 0x68, 0xa0, 0x51, 0x31, 0x08, 0x20, 0xd7, 0xec, 0x43, 0x27, 0xe1,
-              0xba, 0xfd ];
-        assert!(cascade.has(&key_for_revoked_cert_1));
-        #[rustfmt::skip]
-        let key_for_revoked_cert_2 =
-            [ 0xf1, 0x1c, 0x3d, 0xd0, 0x48, 0xf7, 0x4e, 0xdb, 0x7c, 0x45, 0x19, 0x2b, 0x83, 0xe5,
-              0x98, 0x0d, 0x2f, 0x67, 0xec, 0x84, 0xb4, 0xdd, 0xb9, 0x39, 0x6e, 0x33, 0xff, 0x51,
-              0x73, 0xed, 0x69, 0x8f,
-              0x00, 0xd2, 0xe8, 0xf6, 0xaa, 0x80, 0x48, 0x1c, 0xd4 ];
-        assert!(cascade.has(&key_for_revoked_cert_2));
-        #[rustfmt::skip]
-        let key_for_valid_cert =
-            [ 0x99, 0xfc, 0x9d, 0x40, 0xf1, 0xad, 0xb1, 0x63, 0x65, 0x61, 0xa6, 0x1d, 0x68, 0x3d,
-              0x9e, 0xa6, 0xb4, 0x60, 0xc5, 0x7d, 0x0c, 0x75, 0xea, 0x00, 0xc3, 0x41, 0xb9, 0xdf,
-              0xb9, 0x0b, 0x5f, 0x39,
-              0x0b, 0x77, 0x75, 0xf7, 0xaf, 0x9a, 0xe5, 0x42, 0x65, 0xc9, 0xcd, 0x32, 0x57, 0x10,
-              0x77, 0x8e ];
-        assert!(!cascade.has(&key_for_valid_cert));
+        let key_for_revoked_cert_1 = vec![
+            0x2e, 0xb2, 0xd5, 0xa8, 0x60, 0xfe, 0x50, 0xe9, 0xc2, 0x42, 0x36, 0x85, 0x52, 0x98,
+            0x01, 0x50, 0xe4, 0x5d, 0xb5, 0x32, 0x1a, 0x5b, 0x00, 0x5e, 0x26, 0xd6, 0x76, 0x25,
+            0x3a, 0x40, 0x9b, 0xf5, 0x06, 0x2d, 0xf5, 0x68, 0xa0, 0x51, 0x31, 0x08, 0x20, 0xd7,
+            0xec, 0x43, 0x27, 0xe1, 0xba, 0xfd,
+        ];
+        assert!(cascade.has(key_for_revoked_cert_1));
+        let key_for_revoked_cert_2 = vec![
+            0xf1, 0x1c, 0x3d, 0xd0, 0x48, 0xf7, 0x4e, 0xdb, 0x7c, 0x45, 0x19, 0x2b, 0x83, 0xe5,
+            0x98, 0x0d, 0x2f, 0x67, 0xec, 0x84, 0xb4, 0xdd, 0xb9, 0x39, 0x6e, 0x33, 0xff, 0x51,
+            0x73, 0xed, 0x69, 0x8f, 0x00, 0xd2, 0xe8, 0xf6, 0xaa, 0x80, 0x48, 0x1c, 0xd4,
+        ];
+        assert!(cascade.has(key_for_revoked_cert_2));
+        let key_for_valid_cert = vec![
+            0x99, 0xfc, 0x9d, 0x40, 0xf1, 0xad, 0xb1, 0x63, 0x65, 0x61, 0xa6, 0x1d, 0x68, 0x3d,
+            0x9e, 0xa6, 0xb4, 0x60, 0xc5, 0x7d, 0x0c, 0x75, 0xea, 0x00, 0xc3, 0x41, 0xb9, 0xdf,
+            0xb9, 0x0b, 0x5f, 0x39, 0x0b, 0x77, 0x75, 0xf7, 0xaf, 0x9a, 0xe5, 0x42, 0x65, 0xc9,
+            0xcd, 0x32, 0x57, 0x10, 0x77, 0x8e,
+        ];
+        assert!(!cascade.has(key_for_valid_cert));
 
         assert_eq!(cascade.approximate_size_of(), 15408);
 
@@ -849,9 +828,9 @@ mod tests {
 
         assert!(cascade.salt.len() == 0);
         assert!(cascade.inverted == false);
-        assert!(cascade.has(b"this") == true);
-        assert!(cascade.has(b"that") == true);
-        assert!(cascade.has(b"other") == false);
+        assert!(cascade.has(b"this".to_vec()) == true);
+        assert!(cascade.has(b"that".to_vec()) == true);
+        assert!(cascade.has(b"other".to_vec()) == false);
         assert_eq!(cascade.approximate_size_of(), 1001);
     }
 
@@ -864,9 +843,9 @@ mod tests {
 
         assert!(cascade.salt == b"nacl".to_vec());
         assert!(cascade.inverted == false);
-        assert!(cascade.has(b"this") == true);
-        assert!(cascade.has(b"that") == true);
-        assert!(cascade.has(b"other") == false);
+        assert!(cascade.has(b"this".to_vec()) == true);
+        assert!(cascade.has(b"that".to_vec()) == true);
+        assert!(cascade.has(b"other".to_vec()) == false);
         assert_eq!(cascade.approximate_size_of(), 1001);
     }
 
@@ -879,9 +858,9 @@ mod tests {
 
         assert!(cascade.salt.len() == 0);
         assert!(cascade.inverted == false);
-        assert!(cascade.has(b"this") == true);
-        assert!(cascade.has(b"that") == true);
-        assert!(cascade.has(b"other") == false);
+        assert!(cascade.has(b"this".to_vec()) == true);
+        assert!(cascade.has(b"that".to_vec()) == true);
+        assert!(cascade.has(b"other".to_vec()) == false);
         assert_eq!(cascade.approximate_size_of(), 992);
     }
 
@@ -894,9 +873,9 @@ mod tests {
 
         assert!(cascade.salt.len() == 0);
         assert!(cascade.inverted == true);
-        assert!(cascade.has(b"this") == true);
-        assert!(cascade.has(b"that") == true);
-        assert!(cascade.has(b"other") == false);
+        assert!(cascade.has(b"this".to_vec()) == true);
+        assert!(cascade.has(b"that".to_vec()) == true);
+        assert!(cascade.has(b"other".to_vec()) == false);
         assert_eq!(cascade.approximate_size_of(), 1058);
     }
 
@@ -909,9 +888,9 @@ mod tests {
 
         assert!(cascade.salt.len() == 0);
         assert!(cascade.inverted == true);
-        assert!(cascade.has(b"this") == true);
-        assert!(cascade.has(b"that") == true);
-        assert!(cascade.has(b"other") == false);
+        assert!(cascade.has(b"this".to_vec()) == true);
+        assert!(cascade.has(b"that".to_vec()) == true);
+        assert!(cascade.has(b"other".to_vec()) == false);
         assert_eq!(cascade.approximate_size_of(), 1061);
     }
 
@@ -924,9 +903,9 @@ mod tests {
 
         assert!(cascade.salt == b"nacl".to_vec());
         assert!(cascade.inverted == false);
-        assert!(cascade.has(b"this") == true);
-        assert!(cascade.has(b"that") == true);
-        assert!(cascade.has(b"other") == false);
+        assert!(cascade.has(b"this".to_vec()) == true);
+        assert!(cascade.has(b"that".to_vec()) == true);
+        assert!(cascade.has(b"other".to_vec()) == false);
         assert_eq!(cascade.approximate_size_of(), 1070);
     }
 
@@ -975,7 +954,7 @@ mod tests {
     fn cascade_builder_test_exclude_too_few() {
         let mut builder = CascadeBuilder::default(1, 1);
         builder.include(b"1".to_vec());
-        assert!(builder.finalize().is_err());
+        let _ = builder.finalize();
     }
 
     #[test]
@@ -1063,10 +1042,10 @@ mod tests {
 
         // Ensure each query gives the correct result
         for i in 0..included {
-            assert!(cascade.has(&i.to_le_bytes()[..]) == true)
+            assert!(cascade.has(i.to_le_bytes().to_vec()) == true)
         }
         for i in included..total {
-            assert!(cascade.has(&i.to_le_bytes()[..]) == false)
+            assert!(cascade.has(i.to_le_bytes().to_vec()) == false)
         }
     }
 
