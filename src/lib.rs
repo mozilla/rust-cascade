@@ -12,10 +12,11 @@ extern crate sha2;
 
 use byteorder::{ByteOrder, LittleEndian, ReadBytesExt};
 use murmurhash3::murmurhash3_x86_32;
+#[cfg(feature = "builder")]
 use rand::rngs::OsRng;
+#[cfg(feature = "builder")]
 use rand::RngCore;
 use sha2::{Digest, Sha256};
-use std::cmp::max;
 use std::convert::{TryFrom, TryInto};
 use std::fmt;
 use std::io::{ErrorKind, Read};
@@ -257,6 +258,7 @@ impl Bloom {
     /// * `include_capacity` - the number of elements that will be encoded at the new layer.
     /// * `exclude_capacity` - the number of elements in the complement of the encoded set.
     /// * `top_layer`        - whether this is the top layer of the filter.
+    #[cfg(feature = "builder")]
     pub fn new_crlite_bloom(
         include_capacity: usize,
         exclude_capacity: usize,
@@ -287,7 +289,10 @@ impl Bloom {
         // If this formula gives a value of m < 256, we take m=256 instead. This results in very
         // slightly sub-optimal size, but gives us the added benefit of doing less hashing.
         let n_hash_funcs = (-log2_fp_rate).round() as u32;
-        let size = max(256, (r * (-log2_fp_rate) / (f64::ln(2f64))).round() as u32);
+        let size = match (r * (-log2_fp_rate) / (f64::ln(2f64))).round() as u32 {
+            size if size >= 256 => size,
+            _ => 256,
+        };
 
         Bloom {
             n_hash_funcs,
@@ -354,6 +359,7 @@ impl Bloom {
         true
     }
 
+    #[cfg(feature = "builder")]
     fn insert(&mut self, generator: &mut CascadeIndexGenerator, salt: &[u8]) {
         for _ in 0..self.n_hash_funcs {
             let bit_index = generator.next_index(salt, self.size);
@@ -569,6 +575,7 @@ impl fmt::Display for Cascade {
 /// Calling `exclude` before all `include` calls have been made will result in a panic!().
 /// Calling `finalize` before all `exclude` calls have been made will result in a panic!().
 ///
+#[cfg(feature = "builder")]
 pub struct CascadeBuilder {
     filters: Vec<Bloom>,
     salt: Vec<u8>,
@@ -578,6 +585,7 @@ pub struct CascadeBuilder {
     status: BuildStatus,
 }
 
+#[cfg(feature = "builder")]
 impl CascadeBuilder {
     pub fn default(include_capacity: usize, exclude_capacity: usize) -> Self {
         let mut salt = vec![0u8; 16];
@@ -732,6 +740,7 @@ impl CascadeBuilder {
 /// BuildStatus is used to ensure that the `include`, `exclude`, and `finalize` calls to
 /// CascadeBuilder are made in the right order. The (a,b) state indicates that the
 /// CascadeBuilder is waiting for `a` calls to `include` and `b` calls to `exclude`.
+#[cfg(feature = "builder")]
 struct BuildStatus(usize, usize);
 
 /// CascadeBuilder::exclude takes `&mut self` so that it can count exclusions and push items to
@@ -739,6 +748,7 @@ struct BuildStatus(usize, usize);
 /// to the top level bloom filter. An `ExcludeSet` is used by `CascadeBuilder::exclude_threaded` to
 /// track the changes to a `CascadeBuilder` that would be made with a call to
 /// `CascadeBuilder::exclude`.
+#[cfg(feature = "builder")]
 #[derive(Default)]
 pub struct ExcludeSet {
     size: usize,
@@ -749,9 +759,12 @@ pub struct ExcludeSet {
 mod tests {
     use Bloom;
     use Cascade;
+    #[cfg(feature = "builder")]
     use CascadeBuilder;
+    #[cfg(feature = "builder")]
     use CascadeError;
     use CascadeIndexGenerator;
+    #[cfg(feature = "builder")]
     use ExcludeSet;
     use HashAlgorithm;
 
@@ -958,6 +971,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "builder")]
     fn cascade_builder_test_collision() {
         let mut builder = CascadeBuilder::default(1, 1);
         builder.include(b"collision!".to_vec()).ok();
@@ -966,13 +980,18 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "builder")]
     fn cascade_builder_test_exclude_too_few() {
         let mut builder = CascadeBuilder::default(1, 1);
         builder.include(b"1".to_vec()).ok();
-        assert!(matches!(builder.finalize(), Err(CascadeError::CapacityViolation(_))));
+        assert!(matches!(
+            builder.finalize(),
+            Err(CascadeError::CapacityViolation(_))
+        ));
     }
 
     #[test]
+    #[cfg(feature = "builder")]
     fn cascade_builder_test_include_too_few() {
         let mut builder = CascadeBuilder::default(1, 1);
         assert!(matches!(
@@ -982,6 +1001,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "builder")]
     fn cascade_builder_test_include_too_many() {
         let mut builder = CascadeBuilder::default(1, 1);
         builder.include(b"1".to_vec()).ok();
@@ -992,6 +1012,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "builder")]
     fn cascade_builder_test_exclude_too_many() {
         let mut builder = CascadeBuilder::default(1, 1);
         builder.include(b"1".to_vec()).ok();
@@ -1003,6 +1024,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "builder")]
     fn cascade_builder_test_exclude_threaded_no_collect() {
         let mut builder = CascadeBuilder::default(1, 3);
         let mut exclude_set = ExcludeSet::default();
@@ -1010,10 +1032,14 @@ mod tests {
         builder.exclude_threaded(&mut exclude_set, b"2".to_vec());
         builder.exclude_threaded(&mut exclude_set, b"3".to_vec());
         builder.exclude_threaded(&mut exclude_set, b"4".to_vec());
-        assert!(matches!(builder.finalize(), Err(CascadeError::CapacityViolation(_))));
+        assert!(matches!(
+            builder.finalize(),
+            Err(CascadeError::CapacityViolation(_))
+        ));
     }
 
     #[test]
+    #[cfg(feature = "builder")]
     fn cascade_builder_test_exclude_threaded_too_many() {
         let mut builder = CascadeBuilder::default(1, 3);
         let mut exclude_set = ExcludeSet::default();
@@ -1029,6 +1055,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "builder")]
     fn cascade_builder_test_exclude_threaded() {
         let mut builder = CascadeBuilder::default(1, 3);
         let mut exclude_set = ExcludeSet::default();
@@ -1040,6 +1067,7 @@ mod tests {
         builder.finalize().ok();
     }
 
+    #[cfg(feature = "builder")]
     fn cascade_builder_test_generate(hash_alg: HashAlgorithm, inverted: bool) {
         let total = 10_000_usize;
         let included = 100_usize;
@@ -1076,21 +1104,25 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "builder")]
     fn cascade_builder_test_generate_murmurhash3_inverted() {
         cascade_builder_test_generate(HashAlgorithm::MurmurHash3, true);
     }
 
     #[test]
+    #[cfg(feature = "builder")]
     fn cascade_builder_test_generate_murmurhash3() {
         cascade_builder_test_generate(HashAlgorithm::MurmurHash3, false);
     }
 
     #[test]
+    #[cfg(feature = "builder")]
     fn cascade_builder_test_generate_sha256l32() {
         cascade_builder_test_generate(HashAlgorithm::Sha256l32, false);
     }
 
     #[test]
+    #[cfg(feature = "builder")]
     fn cascade_builder_test_generate_sha256() {
         cascade_builder_test_generate(HashAlgorithm::Sha256, false);
     }
