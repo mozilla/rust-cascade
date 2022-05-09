@@ -27,6 +27,7 @@ pub enum CascadeError {
     TooManyLayers,
     Collision,
     UnknownHashFunction,
+    CapacityViolation(&'static str),
     Parse(&'static str),
 }
 
@@ -44,6 +45,9 @@ impl fmt::Display for CascadeError {
             }
             CascadeError::UnknownHashFunction => {
                 write!(f, "Unknown hash function.")
+            }
+            CascadeError::CapacityViolation(function) => {
+                write!(f, "Unexpected call to {}", function)
             }
             CascadeError::Parse(reason) => {
                 write!(f, "Cannot parse cascade: {}", reason)
@@ -450,8 +454,7 @@ impl Cascade {
             return Err(CascadeError::Parse("missing filters"));
         }
 
-        // having a filter implies that top_hash_alg was set.
-        let hash_algorithm = top_hash_alg.unwrap_or_else(|| unreachable!());
+        let hash_algorithm = top_hash_alg.ok_or(CascadeError::Parse("missing hash algorithm"))?;
 
         Ok(Some(Cascade {
             filters,
@@ -603,25 +606,28 @@ impl CascadeBuilder {
         }
     }
 
-    pub fn include(&mut self, item: Vec<u8>) {
+    pub fn include(&mut self, item: Vec<u8>) -> Result<(), CascadeError> {
         match self.status {
             BuildStatus(ref mut cap, _) if *cap > 0 => *cap -= 1,
-            _ => panic!("capacity violation"),
+            _ => return Err(CascadeError::CapacityViolation("include")),
         }
         let mut generator = CascadeIndexGenerator::new(self.hash_algorithm, item);
         self.filters[0].insert(&mut generator, &self.salt);
         self.to_include.push(generator);
+
+        Ok(())
     }
 
-    pub fn exclude(&mut self, item: Vec<u8>) {
+    pub fn exclude(&mut self, item: Vec<u8>) -> Result<(), CascadeError> {
         match self.status {
             BuildStatus(0, ref mut cap) if *cap > 0 => *cap -= 1,
-            _ => panic!("capacity violation"),
+            _ => return Err(CascadeError::CapacityViolation("exclude")),
         }
         let mut generator = CascadeIndexGenerator::new(self.hash_algorithm, item);
         if self.filters[0].has(&mut generator, &self.salt) {
             self.to_exclude.push(generator);
         }
+        Ok(())
     }
 
     /// `exclude_threaded` is like `exclude` but it stores false positives in a caller-owned
@@ -635,12 +641,17 @@ impl CascadeBuilder {
     }
 
     /// `collect_exclude_set` merges an `ExcludeSet` into the internal storage of the CascadeBuilder.
-    pub fn collect_exclude_set(&mut self, exclude_set: &mut ExcludeSet) {
+    pub fn collect_exclude_set(
+        &mut self,
+        exclude_set: &mut ExcludeSet,
+    ) -> Result<(), CascadeError> {
         match self.status {
             BuildStatus(0, ref mut cap) if *cap >= exclude_set.size => *cap -= exclude_set.size,
-            _ => panic!("capacity violation"),
+            _ => return Err(CascadeError::CapacityViolation("exclude")),
         }
         self.to_exclude.append(&mut exclude_set.set);
+
+        Ok(())
     }
 
     fn push_layer(&mut self) -> Result<(), CascadeError> {
@@ -653,9 +664,13 @@ impl CascadeBuilder {
             false => (&mut self.to_exclude, &mut self.to_include),
         };
 
+        // split ownership of `salt` away from `to_encode` and `to_filter`
+        // We need an immutable reference to salt during `to_encode.iter_mut()`
         let mut bloom = Bloom::new_crlite_bloom(to_encode.len(), to_filter.len(), false);
 
-        // temporarily take self.salt since we need an immutable reference for bloom.insert
+        // This mem::take is to separate ownership of `salt` from ownership of `to_include` and
+        // `to_exclude`. It lets us capture `salt` in the closure that we send to `retain_mut`,
+        // which ultimately needs a mutable reference to `self`.
         let salt = std::mem::take(&mut self.salt);
 
         to_encode.iter_mut().for_each(|x| {
@@ -690,7 +705,7 @@ impl CascadeBuilder {
     pub fn finalize(mut self) -> Result<Box<Cascade>, CascadeError> {
         match self.status {
             BuildStatus(0, 0) => (),
-            _ => panic!("capacity violation"),
+            _ => return Err(CascadeError::CapacityViolation("finalize")),
         }
 
         loop {
@@ -735,6 +750,7 @@ mod tests {
     use Bloom;
     use Cascade;
     use CascadeBuilder;
+    use CascadeError;
     use CascadeIndexGenerator;
     use ExcludeSet;
     use HashAlgorithm;
@@ -944,77 +960,83 @@ mod tests {
     #[test]
     fn cascade_builder_test_collision() {
         let mut builder = CascadeBuilder::default(1, 1);
-        builder.include(b"collision!".to_vec());
-        builder.exclude(b"collision!".to_vec());
-        assert!(builder.finalize().is_err());
+        builder.include(b"collision!".to_vec()).ok();
+        builder.exclude(b"collision!".to_vec()).ok();
+        assert!(matches!(builder.finalize(), Err(CascadeError::Collision)));
     }
 
     #[test]
-    #[should_panic(expected = "capacity violation")]
     fn cascade_builder_test_exclude_too_few() {
         let mut builder = CascadeBuilder::default(1, 1);
-        builder.include(b"1".to_vec());
-        let _ = builder.finalize();
+        builder.include(b"1".to_vec()).ok();
+        assert!(matches!(builder.finalize(), Err(CascadeError::CapacityViolation(_))));
     }
 
     #[test]
-    #[should_panic(expected = "capacity violation")]
     fn cascade_builder_test_include_too_few() {
         let mut builder = CascadeBuilder::default(1, 1);
-        builder.exclude(b"1".to_vec());
+        assert!(matches!(
+            builder.exclude(b"1".to_vec()),
+            Err(CascadeError::CapacityViolation(_))
+        ));
     }
 
     #[test]
-    #[should_panic(expected = "capacity violation")]
     fn cascade_builder_test_include_too_many() {
         let mut builder = CascadeBuilder::default(1, 1);
-        builder.include(b"1".to_vec());
-        builder.include(b"2".to_vec());
+        builder.include(b"1".to_vec()).ok();
+        assert!(matches!(
+            builder.include(b"2".to_vec()),
+            Err(CascadeError::CapacityViolation(_))
+        ));
     }
 
     #[test]
-    #[should_panic(expected = "capacity violation")]
     fn cascade_builder_test_exclude_too_many() {
         let mut builder = CascadeBuilder::default(1, 1);
-        builder.include(b"1".to_vec());
-        builder.exclude(b"2".to_vec());
-        builder.exclude(b"3".to_vec());
+        builder.include(b"1".to_vec()).ok();
+        builder.exclude(b"2".to_vec()).ok();
+        assert!(matches!(
+            builder.exclude(b"3".to_vec()),
+            Err(CascadeError::CapacityViolation(_))
+        ));
     }
 
     #[test]
-    #[should_panic(expected = "capacity violation")]
     fn cascade_builder_test_exclude_threaded_no_collect() {
         let mut builder = CascadeBuilder::default(1, 3);
-        let mut exclude_set = ExcludeSet::new();
-        builder.include(b"1".to_vec());
+        let mut exclude_set = ExcludeSet::default();
+        builder.include(b"1".to_vec()).ok();
         builder.exclude_threaded(&mut exclude_set, b"2".to_vec());
         builder.exclude_threaded(&mut exclude_set, b"3".to_vec());
         builder.exclude_threaded(&mut exclude_set, b"4".to_vec());
-        builder.finalize().ok();
+        assert!(matches!(builder.finalize(), Err(CascadeError::CapacityViolation(_))));
     }
 
     #[test]
-    #[should_panic(expected = "capacity violation")]
     fn cascade_builder_test_exclude_threaded_too_many() {
         let mut builder = CascadeBuilder::default(1, 3);
-        let mut exclude_set = ExcludeSet::new();
-        builder.include(b"1".to_vec());
+        let mut exclude_set = ExcludeSet::default();
+        builder.include(b"1".to_vec()).ok();
         builder.exclude_threaded(&mut exclude_set, b"2".to_vec());
         builder.exclude_threaded(&mut exclude_set, b"3".to_vec());
         builder.exclude_threaded(&mut exclude_set, b"4".to_vec());
         builder.exclude_threaded(&mut exclude_set, b"5".to_vec());
-        builder.collect_exclude_set(&mut exclude_set);
+        assert!(matches!(
+            builder.collect_exclude_set(&mut exclude_set),
+            Err(CascadeError::CapacityViolation(_))
+        ));
     }
 
     #[test]
     fn cascade_builder_test_exclude_threaded() {
         let mut builder = CascadeBuilder::default(1, 3);
-        let mut exclude_set = ExcludeSet::new();
-        builder.include(b"1".to_vec());
+        let mut exclude_set = ExcludeSet::default();
+        builder.include(b"1".to_vec()).ok();
         builder.exclude_threaded(&mut exclude_set, b"2".to_vec());
         builder.exclude_threaded(&mut exclude_set, b"3".to_vec());
         builder.exclude_threaded(&mut exclude_set, b"4".to_vec());
-        builder.collect_exclude_set(&mut exclude_set);
+        builder.collect_exclude_set(&mut exclude_set).ok();
         builder.finalize().ok();
     }
 
@@ -1026,10 +1048,10 @@ mod tests {
         let mut builder =
             CascadeBuilder::new(hash_alg, salt, included, (total - included) as usize);
         for i in 0..included {
-            builder.include(i.to_le_bytes().to_vec());
+            builder.include(i.to_le_bytes().to_vec()).ok();
         }
         for i in included..total {
-            builder.exclude(i.to_le_bytes().to_vec());
+            builder.exclude(i.to_le_bytes().to_vec()).ok();
         }
         let cascade = builder.finalize().unwrap();
 
