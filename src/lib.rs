@@ -515,6 +515,10 @@ impl Cascade {
         rv
     }
 
+    pub fn invert(&mut self) {
+        self.inverted = !self.inverted;
+    }
+
     /// Determine the approximate amount of memory in bytes used by this
     /// Cascade. Because this implementation does not integrate with the
     /// allocator, it can't get an accurate measurement of how much memory it
@@ -1040,7 +1044,7 @@ mod tests {
         builder.finalize().ok();
     }
 
-    fn cascade_builder_test_generate(hash_alg: HashAlgorithm) {
+    fn cascade_builder_test_generate(hash_alg: HashAlgorithm, inverted: bool) {
         let total = 10_000_usize;
         let included = 100_usize;
 
@@ -1053,7 +1057,11 @@ mod tests {
         for i in included..total {
             builder.exclude(i.to_le_bytes().to_vec()).ok();
         }
-        let cascade = builder.finalize().unwrap();
+        let mut cascade = builder.finalize().unwrap();
+
+        if inverted {
+            cascade.invert()
+        }
 
         // Ensure we can serialize / deserialize
         let cascade_bytes = cascade.to_bytes().expect("failed to serialize cascade");
@@ -1064,25 +1072,30 @@ mod tests {
 
         // Ensure each query gives the correct result
         for i in 0..included {
-            assert!(cascade.has(i.to_le_bytes().to_vec()) == true)
+            assert!(cascade.has(i.to_le_bytes().to_vec()) == true ^ inverted)
         }
         for i in included..total {
-            assert!(cascade.has(i.to_le_bytes().to_vec()) == false)
+            assert!(cascade.has(i.to_le_bytes().to_vec()) == false ^ inverted)
         }
+    }
+
+    #[test]
+    fn cascade_builder_test_generate_murmurhash3_inverted() {
+        cascade_builder_test_generate(HashAlgorithm::MurmurHash3, true);
     }
 
     #[test]
     fn cascade_builder_test_generate_murmurhash3() {
-        cascade_builder_test_generate(HashAlgorithm::MurmurHash3);
+        cascade_builder_test_generate(HashAlgorithm::MurmurHash3, false);
     }
 
     #[test]
     fn cascade_builder_test_generate_sha256l32() {
-        cascade_builder_test_generate(HashAlgorithm::Sha256l32);
+        cascade_builder_test_generate(HashAlgorithm::Sha256l32, false);
     }
 
     #[test]
     fn cascade_builder_test_generate_sha256() {
-        cascade_builder_test_generate(HashAlgorithm::Sha256);
+        cascade_builder_test_generate(HashAlgorithm::Sha256, false);
     }
 }
