@@ -672,20 +672,17 @@ impl CascadeBuilder {
         // We need an immutable reference to salt during `to_encode.iter_mut()`
         let mut bloom = Bloom::new_crlite_bloom(to_encode.len(), to_filter.len(), false);
 
-        // This mem::take is to separate ownership of `salt` from ownership of `to_include` and
-        // `to_exclude`. It lets us capture `salt` in the closure that we send to `retain_mut`,
-        // which ultimately needs a mutable reference to `self`.
-        let salt = std::mem::take(&mut self.salt);
+        let salt = self.salt.as_slice();
 
         to_encode.iter_mut().for_each(|x| {
             x.next_layer();
-            bloom.insert(x, &salt)
+            bloom.insert(x, salt)
         });
 
         let mut delta = to_filter.len();
         to_filter.retain_mut(|x| {
             x.next_layer();
-            bloom.has(x, &salt)
+            bloom.has(x, salt)
         });
         delta -= to_filter.len();
 
@@ -701,7 +698,6 @@ impl CascadeBuilder {
             }
         }
 
-        self.salt = salt;
         self.filters.push(bloom);
         Ok(())
     }
