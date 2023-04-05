@@ -2,7 +2,7 @@
 name = "rust_cascade"
 description = "A simple bloom filter cascade implementation in Rust."
 license = "MPL-2.0"
-version = "1.4.0"
+version = "1.5.0"
 authors = ["Mark Goodwin <mgoodwin@mozilla.com>", "Dana Keeler <dkeeler@mozilla.com>", "J.C. Jones <jc@mozilla.com>", "John Schanck <jschanck@mozilla.com>"]
 documentation = "https://docs.rs/rust_cascade/"
 homepage = "https://github.com/mozilla/rust-cascade"
